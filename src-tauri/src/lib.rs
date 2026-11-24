@@ -1,18 +1,23 @@
 mod claude;
 mod db;
 mod sources;
+mod workflow;
 
 use claude::{StreamEvent, TurnRequest};
-use db::{Chat, Db, Message};
+use db::{Chat, Db, Message, NewMessage};
 use serde::Serialize;
+use sources::ToolPolicy;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
+use workflow::{Action, Event, Status};
 
 const SETTING_CLAUDE_PATH: &str = "claude_path";
 const SETTING_MODEL: &str = "model";
+/// Team members' emails, one per line ("Name <email>" or just the email).
+const SETTING_TEAM: &str = "team";
 /// Comma-separated source ids ticked under the message box (remembered between searches).
 const SETTING_ACTIVE_SOURCES: &str = "active_sources";
 /// Per-source claude.ai connector name override: `connector_<source id>`.
@@ -77,7 +82,7 @@ fn get_messages(state: State<AppState>, chat_id: String) -> CmdResult<Vec<Messag
         .map_err(err)
 }
 
-// ---------- sending ----------
+// ---------- running a turn ----------
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -87,71 +92,44 @@ struct TurnFinished {
     cancelled: bool,
 }
 
-/// Saves the user message, then runs the turn in the background.
+/// What the turn is for: a search, or a workflow step Claude performs.
+#[derive(Clone, Copy)]
+enum TurnKind {
+    Search,
+    Step(Action),
+}
+
+/// Runs one Claude turn in the background for `chat_id`.
 /// Progress arrives as `claude://event`; the end as `claude://done`.
-#[tauri::command]
-fn send_message(
+fn start_turn(
     app: AppHandle,
-    state: State<AppState>,
+    state: &AppState,
     chat_id: String,
-    text: String,
-    sources: Vec<String>,
-) -> CmdResult<Message> {
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return Err("Message is empty".into());
-    }
-    if state.running.lock().unwrap().contains_key(&chat_id) {
-        return Err("A reply is still being generated for this chat".into());
-    }
-
-    let sources: Vec<String> = sources::SOURCES
-        .iter()
-        .filter(|d| sources.iter().any(|s| s == d.id))
-        .map(|d| d.id.to_string())
-        .collect();
-    let whatsapp_files = list_whatsapp_names(&state.workspace);
-
-    let (user_msg, chat, claude_path, model, policy) = {
+    prompt: String,
+    policy: ToolPolicy,
+    kind: TurnKind,
+) -> CmdResult<()> {
+    let (chat, claude_path, model) = {
         let db = state.db.lock().unwrap();
-        let chat = db
-            .get_chat(&chat_id)
-            .map_err(err)?
-            .ok_or("Chat not found")?;
-        let is_first = db.list_messages(&chat_id).map_err(err)?.is_empty();
-        let msg = db
-            .add_message(&chat_id, "user", &text, &sources)
-            .map_err(err)?;
-        db.set_setting(SETTING_ACTIVE_SOURCES, &format!(",{}", sources.join(",")))
-            .map_err(err)?;
-        let selected: Vec<sources::Selected> = sources
-            .iter()
-            .filter_map(|id| sources::get(id))
-            .map(|def| sources::Selected {
-                def,
-                connector: def
-                    .default_connector
-                    .map(|_| connector_name(&db, def)),
-            })
-            .collect();
-        let policy = sources::policy(&selected, &whatsapp_files);
-        if is_first {
-            db.rename_chat(&chat_id, &make_title(&text)).map_err(err)?;
-        }
         (
-            msg,
-            chat,
+            db.get_chat(&chat_id)
+                .map_err(err)?
+                .ok_or("Chat not found")?,
             db.get_setting(SETTING_CLAUDE_PATH).map_err(err)?,
             db.get_setting(SETTING_MODEL).map_err(err)?,
-            policy,
         )
     };
-
     let bin = claude::find_claude(claude_path.as_deref())
         .ok_or("Claude Code CLI not found. Install it, or set its path in Settings.")?;
 
     let (tx, rx) = oneshot::channel();
-    state.running.lock().unwrap().insert(chat_id.clone(), tx);
+    {
+        let mut running = state.running.lock().unwrap();
+        if running.contains_key(&chat_id) {
+            return Err("A reply is still being generated for this chat".into());
+        }
+        running.insert(chat_id.clone(), tx);
+    }
 
     let workspace = state.workspace.clone();
     tauri::async_runtime::spawn(async move {
@@ -164,7 +142,7 @@ fn send_message(
             TurnRequest {
                 bin: &bin,
                 cwd: &workspace,
-                prompt: &text,
+                prompt: &prompt,
                 resume_session: chat.claude_session_id.as_deref(),
                 model: model.as_deref(),
                 policy: &policy,
@@ -183,51 +161,156 @@ fn send_message(
         if db.get_chat(&chat_id).ok().flatten().is_none() {
             return;
         }
-
-        let finished = match outcome {
-            Ok(res) => {
-                if let Some(sid) = &res.session_id {
-                    let _ = db.set_session_id(&chat_id, sid);
-                }
-                let (role, content) = if res.is_error {
-                    let detail = if res.text.trim().is_empty() {
-                        res.stderr.trim().to_string()
-                    } else {
-                        res.text.trim().to_string()
-                    };
-                    ("error", format!("Claude returned an error: {detail}"))
-                } else {
-                    ("assistant", res.text.trim().to_string())
-                };
-                let message = if content.is_empty() {
-                    None
-                } else if res.cancelled {
-                    db.add_message(
-                        &chat_id,
-                        "assistant",
-                        &format!("{content}\n\n*(stopped)*"),
-                        &[],
-                    )
-                    .ok()
-                } else {
-                    db.add_message(&chat_id, role, &content, &[]).ok()
-                };
-                TurnFinished {
-                    chat_id: chat_id.clone(),
-                    message,
-                    cancelled: res.cancelled,
-                }
-            }
-            Err(e) => TurnFinished {
-                chat_id: chat_id.clone(),
-                message: db.add_message(&chat_id, "error", &e, &[]).ok(),
-                cancelled: false,
-            },
-        };
+        let message = finish_turn(&db, &chat_id, kind, outcome);
+        let cancelled = message
+            .as_ref()
+            .is_some_and(|m| m.content.ends_with("*(stopped)*"));
         drop(db);
-        let _ = app.emit("claude://done", finished);
+        let _ = app.emit(
+            "claude://done",
+            TurnFinished {
+                chat_id,
+                message,
+                cancelled,
+            },
+        );
     });
+    Ok(())
+}
 
+/// Stores the turn's answer and moves the workflow forward.
+fn finish_turn(
+    db: &Db,
+    chat_id: &str,
+    kind: TurnKind,
+    outcome: Result<claude::TurnResult, String>,
+) -> Option<Message> {
+    let res = match outcome {
+        Ok(res) => res,
+        Err(e) => return db.add_message(chat_id, NewMessage::new("error", &e)).ok(),
+    };
+    if let Some(sid) = &res.session_id {
+        let _ = db.set_session_id(chat_id, sid);
+    }
+    let usage = res.usage.as_ref();
+
+    if res.is_error {
+        let detail = if res.text.trim().is_empty() {
+            res.stderr.trim()
+        } else {
+            res.text.trim()
+        };
+        let text = format!("Claude returned an error: {detail}");
+        return db
+            .add_message(chat_id, NewMessage::new("error", &text).usage(usage))
+            .ok();
+    }
+
+    let (content, search_outcome) = workflow::strip_outcome(&res.text);
+    if content.is_empty() {
+        return None;
+    }
+    let msg_kind = match kind {
+        TurnKind::Search => "chat",
+        TurnKind::Step(a) => a.output_kind(),
+    };
+    if res.cancelled {
+        let text = format!("{content}\n\n*(stopped)*");
+        return db
+            .add_message(
+                chat_id,
+                NewMessage::new("assistant", &text)
+                    .kind(msg_kind)
+                    .usage(usage),
+            )
+            .ok();
+    }
+
+    let message = db
+        .add_message(
+            chat_id,
+            NewMessage::new("assistant", &content)
+                .kind(msg_kind)
+                .usage(usage),
+        )
+        .ok();
+    let event = match kind {
+        TurnKind::Search => search_outcome,
+        TurnKind::Step(a) => Some(a.done_event()),
+    };
+    if let Some(e) = event {
+        let _ = apply_event(db, chat_id, e);
+    }
+    message
+}
+
+/// Applies a workflow event if the state machine allows it; returns the new status.
+fn apply_event(db: &Db, chat_id: &str, event: Event) -> CmdResult<Option<Status>> {
+    let chat = db.get_chat(chat_id).map_err(err)?.ok_or("Chat not found")?;
+    let current = Status::parse(&chat.status);
+    match workflow::next(current, event) {
+        Some(next) => {
+            db.set_status(chat_id, next.as_str()).map_err(err)?;
+            Ok(Some(next))
+        }
+        None => Ok(None),
+    }
+}
+
+fn source_policy(db: &Db, workspace: &std::path::Path, source_ids: &[String]) -> ToolPolicy {
+    let selected: Vec<sources::Selected> = source_ids
+        .iter()
+        .filter_map(|id| sources::get(id))
+        .map(|def| sources::Selected {
+            def,
+            connector: def.default_connector.map(|_| connector_name(db, def)),
+        })
+        .collect();
+    sources::policy(&selected, |id| sources::local_files(workspace, id))
+}
+
+// ---------- searching ----------
+
+/// Saves the user message, then searches the ticked sources in the background.
+#[tauri::command]
+fn send_message(
+    app: AppHandle,
+    state: State<AppState>,
+    chat_id: String,
+    text: String,
+    sources: Vec<String>,
+) -> CmdResult<Message> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("Message is empty".into());
+    }
+    if state.running.lock().unwrap().contains_key(&chat_id) {
+        return Err("A reply is still being generated for this chat".into());
+    }
+    let sources: Vec<String> = sources::SOURCES
+        .iter()
+        .filter(|d| sources.iter().any(|s| s == d.id))
+        .map(|d| d.id.to_string())
+        .collect();
+
+    let (user_msg, policy) = {
+        let db = state.db.lock().unwrap();
+        db.get_chat(&chat_id)
+            .map_err(err)?
+            .ok_or("Chat not found")?;
+        let is_first = db.list_messages(&chat_id).map_err(err)?.is_empty();
+        let msg = db
+            .add_message(&chat_id, NewMessage::new("user", &text).sources(&sources))
+            .map_err(err)?;
+        db.set_setting(SETTING_ACTIVE_SOURCES, &format!(",{}", sources.join(",")))
+            .map_err(err)?;
+        if is_first {
+            db.rename_chat(&chat_id, &make_title(&text)).map_err(err)?;
+        }
+        (msg, source_policy(&db, &state.workspace, &sources))
+    };
+
+    start_turn(app, &state, chat_id, text, policy, TurnKind::Search)?;
     Ok(user_msg)
 }
 
@@ -256,6 +339,141 @@ fn make_title(text: &str) -> String {
     }
 }
 
+// ---------- workflow ----------
+
+/// A step done by a person outside the app (sending an email, approving),
+/// recorded in the chat and applied to the state machine.
+#[tauri::command]
+fn workflow_event(
+    state: State<AppState>,
+    chat_id: String,
+    event: String,
+    recipients: Vec<String>,
+) -> CmdResult<Vec<Message>> {
+    let ev = Event::parse(&event).ok_or("Unknown workflow event")?;
+    let db = state.db.lock().unwrap();
+    let chat = db
+        .get_chat(&chat_id)
+        .map_err(err)?
+        .ok_or("Chat not found")?;
+    let current = Status::parse(&chat.status);
+    let next = workflow::next(current, ev).ok_or_else(|| {
+        format!(
+            "This step isn't available while the request is '{}'",
+            current.as_str()
+        )
+    })?;
+    let to = recipients.join(", ");
+    let text = match ev {
+        Event::SentForApproval => format!("Sent for approval to {to}"),
+        Event::Approved => "Approved by Operations".into(),
+        Event::Rejected => "Answer marked as not correct: ask the supplier".into(),
+        Event::SentToOps => format!("Supplier message sent to Operations: {to}"),
+        Event::SentToSales => format!("Final answer sent to {to}"),
+        _ => event.clone(),
+    };
+    let msg = db
+        .add_message(&chat_id, NewMessage::new("event", &text).kind(&event))
+        .map_err(err)?;
+    db.set_status(&chat_id, next.as_str()).map_err(err)?;
+    Ok(vec![msg])
+}
+
+/// A step Claude performs: drafting the supplier message or writing the final answer.
+/// For `final_from_supplier`, `supplier_answer` is recorded first and saved to "Saved answers".
+#[tauri::command]
+fn run_step(
+    app: AppHandle,
+    state: State<AppState>,
+    chat_id: String,
+    step: String,
+    supplier_answer: Option<String>,
+) -> CmdResult<Vec<Message>> {
+    let action = match step.as_str() {
+        "draft_supplier" => Action::DraftSupplier,
+        "final_from_approval" => Action::FinalFromApproval,
+        "final_from_supplier" => Action::FinalFromSupplier,
+        _ => return Err("Unknown step".into()),
+    };
+    if state.running.lock().unwrap().contains_key(&chat_id) {
+        return Err("A reply is still being generated for this chat".into());
+    }
+
+    let mut added = Vec::new();
+    {
+        let db = state.db.lock().unwrap();
+        let chat = db
+            .get_chat(&chat_id)
+            .map_err(err)?
+            .ok_or("Chat not found")?;
+        let mut status = Status::parse(&chat.status);
+
+        if action == Action::FinalFromSupplier {
+            let answer = supplier_answer
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .ok_or("Paste the supplier's answer first")?;
+            // B5: record the answer (unless it was already recorded and only the final answer is re-run).
+            if let Some(next) = workflow::next(status, Event::SupplierAnswered) {
+                let request = db
+                    .list_messages(&chat_id)
+                    .map_err(err)?
+                    .into_iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content)
+                    .unwrap_or_default();
+                let file = workflow::save_answer(
+                    &state.workspace,
+                    &chat_id,
+                    &chat.title,
+                    &request,
+                    answer,
+                )
+                .map_err(err)?;
+                let text = format!(
+                    "Supplier answer recorded and saved to **Saved answers** ({file}):\n\n> {}",
+                    answer.replace('\n', "\n> ")
+                );
+                added.push(
+                    db.add_message(
+                        &chat_id,
+                        NewMessage::new("event", &text).kind("supplier_answered"),
+                    )
+                    .map_err(err)?,
+                );
+                db.set_status(&chat_id, next.as_str()).map_err(err)?;
+                status = next;
+            }
+        }
+
+        if !action.allowed_from(status) {
+            return Err(format!(
+                "This step isn't available while the request is '{}'",
+                status.as_str()
+            ));
+        }
+        added.push(
+            db.add_message(
+                &chat_id,
+                NewMessage::new("user", action.label()).kind("action"),
+            )
+            .map_err(err)?,
+        );
+    }
+
+    let prompt = action.prompt(supplier_answer.as_deref());
+    start_turn(
+        app,
+        &state,
+        chat_id,
+        prompt,
+        sources::policy_no_tools(),
+        TurnKind::Step(action),
+    )?;
+    Ok(added)
+}
+
 // ---------- data sources ----------
 
 fn connector_name(db: &Db, def: &sources::SourceDef) -> String {
@@ -274,6 +492,8 @@ struct SourceInfo {
     /// claude.ai connector used for this source (None for local sources).
     connector: Option<String>,
     active: bool,
+    /// Number of files, for local sources (WhatsApp, Saved answers).
+    files: Option<usize>,
 }
 
 #[tauri::command]
@@ -289,6 +509,8 @@ fn list_sources(state: State<AppState>) -> CmdResult<Vec<SourceInfo>> {
             active: active
                 .as_deref()
                 .is_none_or(|a| a.split(',').any(|id| id == def.id)),
+            files: sources::local_rel_dir(def.id)
+                .map(|_| sources::local_files(&state.workspace, def.id).len()),
         })
         .collect())
 }
@@ -339,17 +561,7 @@ struct SourceFile {
 }
 
 fn list_whatsapp_names(workspace: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(sources::whatsapp_dir(workspace))
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().is_file())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| !n.starts_with('.'))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
+    sources::local_files(workspace, "whatsapp")
 }
 
 #[tauri::command]
@@ -419,6 +631,8 @@ fn remove_whatsapp_file(state: State<AppState>, name: String) -> CmdResult<()> {
 struct Settings {
     claude_path: String,
     model: String,
+    /// One team member per line: "Name <email>" or "email".
+    team: String,
 }
 
 #[derive(Serialize)]
@@ -441,12 +655,22 @@ fn get_settings(state: State<AppState>) -> CmdResult<Settings> {
             .get_setting(SETTING_MODEL)
             .map_err(err)?
             .unwrap_or_default(),
+        team: db
+            .get_setting(SETTING_TEAM)
+            .map_err(err)?
+            .unwrap_or_default(),
     })
 }
 
 #[tauri::command]
-fn save_settings(state: State<AppState>, claude_path: String, model: String) -> CmdResult<()> {
+fn save_settings(
+    state: State<AppState>,
+    claude_path: String,
+    model: String,
+    team: String,
+) -> CmdResult<()> {
     let db = state.db.lock().unwrap();
+    db.set_setting(SETTING_TEAM, team.trim()).map_err(err)?;
     db.set_setting(SETTING_CLAUDE_PATH, claude_path.trim())
         .map_err(err)?;
     db.set_setting(SETTING_MODEL, model.trim()).map_err(err)?;
@@ -519,6 +743,8 @@ pub fn run() {
             list_whatsapp_files,
             add_whatsapp_files,
             remove_whatsapp_file,
+            workflow_event,
+            run_step,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

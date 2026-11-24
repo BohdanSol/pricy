@@ -6,7 +6,10 @@ Internal desktop tool for Sales / OPS to find quote prices quickly, using the co
 **Covers:** transfers and tours.
 **Output:** a short answer with the price, timing (travel time or tour duration), conditions and the source it came from.
 
-Architecture, data flow and how the build maps to the target workflow: [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md).
+**Workflow:** price found → approval by Operations → final answer to Sales; or no price → supplier message via Operations → supplier answer saved → final answer to Sales. Team emails are set in Settings; messages open in the mail app.
+**Token usage** is shown under every answer and as a total per request.
+
+Architecture and data flow: [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md). Workflow state machines: [architecture/WORKFLOW.md](architecture/WORKFLOW.md).
 
 ## How it works
 
@@ -45,8 +48,10 @@ If the app can't find `claude`, set the CLI path in **Settings**. The app checks
 | `src/App.tsx` | Chat UI: history sidebar, streaming replies, composer |
 | `src/SettingsDialog.tsx` | Data sources (connectors, WhatsApp files), Claude CLI path, model |
 | `src/useSources.ts` | Source list, ticked sources, connector status |
+| `src/Workflow.tsx` | Workflow bar, send dialog (team checkboxes → mail), supplier answer dialog, token usage |
 | `src/api.ts` | Typed wrappers for Tauri commands and events |
 | `src-tauri/src/lib.rs` | Tauri commands, app state |
 | `src-tauri/src/claude.rs` | Finds and runs the Claude CLI, parses `stream-json`, lists connectors |
 | `src-tauri/src/sources.rs` | Source definitions and the per-search tool policy |
+| `src-tauri/src/workflow.rs` | Request state machine, Claude workflow steps, Saved answers |
 | `src-tauri/src/db.rs` | SQLite schema and queries |

@@ -7,21 +7,53 @@ export interface Chat {
   claudeSessionId: string | null;
   createdAt: number;
   updatedAt: number;
+  status: ChatStatus;
 }
 
-export type Role = "user" | "assistant" | "error";
+/** Workflow state of a request (see architecture/WORKFLOW.md). */
+export type ChatStatus =
+  | "new"
+  | "answered"
+  | "not_found"
+  | "pending_approval"
+  | "approved"
+  | "supplier_draft"
+  | "waiting_supplier"
+  | "supplier_answered"
+  | "final_ready"
+  | "completed";
+
+export type WorkflowEvent = "sent_for_approval" | "approved" | "rejected" | "sent_to_ops" | "sent_to_sales";
+export type WorkflowStep = "draft_supplier" | "final_from_approval" | "final_from_supplier";
+
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** API-equivalent cost reported by Claude Code. */
+  costUsd: number;
+  durationMs: number;
+  numTurns: number;
+  models: string[];
+}
+
+export type Role = "user" | "assistant" | "error" | "event";
+export type MessageKind = "chat" | "action" | "supplier_draft" | "final" | string;
 
 export interface Message {
   id: number;
   chatId: string;
   role: Role;
+  kind: MessageKind;
   content: string;
   createdAt: number;
   /** Source ids searched for this message (user messages). */
   sources: string[];
+  usage: Usage | null;
 }
 
-export type SourceId = "tint" | "slack" | "whatsapp" | "drive";
+export type SourceId = "tint" | "slack" | "whatsapp" | "saved" | "drive";
 
 export interface SourceInfo {
   id: SourceId;
@@ -32,6 +64,8 @@ export interface SourceInfo {
   /** Connector actually used (default or overridden in Settings). */
   connector: string | null;
   active: boolean;
+  /** File count for local sources (WhatsApp, Saved answers). */
+  files: number | null;
 }
 
 export interface Connector {
@@ -49,6 +83,8 @@ export interface SourceFile {
 export interface Settings {
   claudePath: string;
   model: string;
+  /** One team member per line: "Name <email>" or "email". */
+  team: string;
 }
 
 export interface ClaudeStatus {
@@ -87,6 +123,10 @@ export const api = {
   listWhatsappFiles: () => invoke<SourceFile[]>("list_whatsapp_files"),
   addWhatsappFiles: (paths: string[]) => invoke<string[]>("add_whatsapp_files", { paths }),
   removeWhatsappFile: (name: string) => invoke<void>("remove_whatsapp_file", { name }),
+  workflowEvent: (chatId: string, event: WorkflowEvent, recipients: string[] = []) =>
+    invoke<Message[]>("workflow_event", { chatId, event, recipients }),
+  runStep: (chatId: string, step: WorkflowStep, supplierAnswer?: string) =>
+    invoke<Message[]>("run_step", { chatId, step, supplierAnswer: supplierAnswer ?? null }),
 };
 
 export const onStreamEvent = (cb: (e: StreamEvent) => void): Promise<UnlistenFn> =>

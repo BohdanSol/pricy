@@ -38,6 +38,7 @@ flowchart LR
 | Commands and state | [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | Chats, messages, settings, sources, WhatsApp file management |
 | CLI runner | [src-tauri/src/claude.rs](../src-tauri/src/claude.rs) | Finds `claude`, runs a turn, parses `stream-json`, lists connectors |
 | Sources and tool policy | [src-tauri/src/sources.rs](../src-tauri/src/sources.rs) | Source definitions, per-turn allow/deny rules and instructions |
+| Workflow | [src-tauri/src/workflow.rs](../src-tauri/src/workflow.rs), [src/Workflow.tsx](../src/Workflow.tsx) | Request state machine, Claude steps (drafts, final answers), send dialog, token usage |
 | Storage | [src-tauri/src/db.rs](../src-tauri/src/db.rs) | SQLite schema and migrations |
 | Assistant instructions | [src-tauri/src/system_prompt.md](../src-tauri/src/system_prompt.md) | How to answer: price, conditions, source, date; never invent prices |
 
@@ -73,7 +74,8 @@ sequenceDiagram
 | TINT | claude.ai connector `claude.ai TINT-staging` (MCP) | Only tools matching read-type name patterns are allowed (`*search*`, `*get_*`, `*list*`, `*read*`, `*find*`, `*fetch*`, `*query*`, `*download*`, `*lookup*`); everything else is denied in headless mode | Connect at claude.ai → Settings → Connectors |
 | Slack | claude.ai connector `claude.ai Slack` | Same patterns | Same |
 | Drive | claude.ai connector `claude.ai Google Drive` | Same patterns (search, read, download; no create, copy or share) | Same |
-| WhatsApp | `.txt` chat exports picked in Settings, copied to `workspace/sources/whatsapp/` | Only `Read` / `Grep` / `Glob`, and only when WhatsApp is ticked; no write or shell tools exist | Settings → Attach .txt export |
+| WhatsApp | `.txt` chat exports picked in Settings, copied to `workspace/sources/whatsapp/` | Only `Read` / `Grep` / `Glob`, and only when a local source is ticked; no write or shell tools exist | Settings → Attach .txt export |
+| Saved answers | Supplier answers recorded in Pricy, `workspace/sources/answers/*.md` | Same as WhatsApp | Filled by *Record supplier answer…* |
 
 Per search, [sources.rs](../src-tauri/src/sources.rs) turns the ticked sources into:
 - `--allowedTools`: `ToolSearch`, read patterns for each ticked connector, and `Read`/`Grep`/`Glob` if WhatsApp is ticked;
@@ -91,29 +93,30 @@ Design notes, verified with CLI 2.1.197:
 
 | Path | Contents |
 |---|---|
-| `pricy.db` | `chats` (title, Claude session id), `messages` (role, content, searched sources), `settings` (CLI path, model, ticked sources, connector names) |
+| `pricy.db` | `chats` (title, Claude session id, workflow status), `messages` (role, kind, content, searched sources, token usage), `settings` (CLI path, model, team, ticked sources, connector names) |
 | `workspace/` | Working directory for the CLI; Claude sessions are keyed to it |
 | `workspace/sources/whatsapp/` | Copies of attached WhatsApp exports |
+| `workspace/sources/answers/` | Supplier answers recorded in Pricy (the **Saved answers** source) |
 
 ## Workflow coverage
 
-Compared with [expected_workflow.png](expected_workflow.png):
+Compared with [expected_workflow.png](expected_workflow.png). The state machines behind each step are in [WORKFLOW.md](WORKFLOW.md).
 
-| Step | Owner | Status | Notes |
+| Step | Owner | Status | How |
 |---|---|---|---|
-| 1. Sales request in fixed format (booking no., date, pax, service type, itinerary, pick-up / drop-off, notes) | Sales | 🟡 Partial | Free text; Claude asks for missing details. No structured form yet. |
-| 2. Claude checks the database | Claude | 🟢 Done | Searches the ticked sources, answers with price, time, source and date; flags old quotes. |
-| A3. Operations approves the answer | Ops | 🔴 Not started | Needs Ops to see Sales' requests: shared state (backend or Slack) is undecided. |
-| A4. Claude sends the result to Sales | Claude | 🔴 Not started | Same dependency. Today the person asking gets the answer directly. |
-| B3. Claude drafts a supplier message | Claude | 🟡 Partial | The prompt offers a draft when nothing is found. No dedicated UI or template yet. |
-| B4. Operations sends it to the supplier | Ops | ⚪ Manual | Outside the app (WhatsApp / email). |
-| B5. Save the supplier's answer for future requests | Ops | 🔴 Not started | Write target undecided (Drive sheet, TINT, or a new store). Sources are read-only today on purpose. |
-| B6. Claude sends the answer to Sales | Claude | 🔴 Not started | Same dependency as A3/A4. |
+| 1. Sales request (booking no., date, pax, service type, itinerary / tour details, pick-up / drop-off, notes) | Sales | 🟡 Partial | Free text; Claude asks for missing details. No structured form yet. |
+| 2. Claude checks the database | Claude | 🟢 Done | Searches the ticked sources (incl. **Saved answers**); a hidden marker sets *Price found* / *No price*. |
+| A3. Operations approves | Ops | 🟢 Done | *Send for approval…* emails the picked team members; *Approved* / *Not correct* are recorded in the request. |
+| A4. Claude sends the result to Sales | Claude | 🟢 Done | Claude writes the **Final answer** card; *Send to Sales…* emails it. |
+| B3. Claude prepares the supplier message | Claude | 🟢 Done | *Draft supplier message* (also automatic after *Not correct*). |
+| B4. Operations sends it | Ops | 🟢 Done | *Send to Operations…* emails the draft; Ops forwards it to the supplier outside Pricy. |
+| B5. Save the answer for future requests | Ops | 🟢 Done (local) | *Record supplier answer…* saves it to **Saved answers**, which later searches use. Local to each computer. |
+| B6. Claude sends the answer to Sales | Claude | 🟢 Done | Final answer from the supplier reply; *Send to Sales…*. |
 
 ## Open decisions
 
-1. **Shared state between Sales and Ops** (blocks A3, A4, B6): a small shared backend, Slack threads as the handoff, or one person doing both roles for the MVP.
-2. **Where approved and supplier answers are saved** (B5), and who is allowed to write there.
+1. **Shared state between Sales and Ops**: today approvals are recorded by the person running the request, and messages go by email. A shared backend or Slack would give Ops their own inbox.
+2. **Shared Saved answers** (B5): saved locally for now; a Drive sheet or TINT would share them across the team.
 3. **Structured request form** for step 1, and whether the booking number comes from TINT.
 4. **TINT staging vs production**, and whether login is per user.
 5. **Distribution:** macOS only or Windows too; code signing; whether every staff member has a Claude Code seat.

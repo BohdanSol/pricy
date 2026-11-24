@@ -1,0 +1,134 @@
+# Request workflow — state machines
+
+The target flow is [expected_workflow.png](expected_workflow.png). In Pricy, each chat is one request, and its `status` is a deterministic finite automaton (DFA): it changes only through the transition function `next(status, event)` in [src-tauri/src/workflow.rs](../src-tauri/src/workflow.rs). Events that aren't allowed in the current state are rejected, and the UI only offers the actions that are valid (see [src/Workflow.tsx](../src/Workflow.tsx)).
+
+- **People** trigger events with buttons: sending an email, marking approved or not correct, recording the supplier's answer.
+- **Claude** triggers events when a turn finishes:
+  - a search ends with a hidden marker, `[[pricy:found]]` or `[[pricy:not_found]]`, which the app removes before showing the answer;
+  - a workflow step (supplier draft, final answer) fires its own event.
+- **Sending** opens the user's mail app (`mailto:`) with the team members ticked in the send dialog and a prefilled message. The team list is set in Settings → Team (`Name <email>`, one per line). Sales and Operations sit in the same office, so approvals are recorded in Pricy by whoever runs the request.
+
+## Full state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> new
+    new --> answered: found (search)
+    new --> not_found: not_found (search)
+    answered --> answered: found (follow-up search)
+    answered --> not_found: not_found (follow-up search)
+    not_found --> answered: found (follow-up search)
+    not_found --> not_found: not_found (follow-up search)
+
+    answered --> pending_approval: sent_for_approval
+    pending_approval --> pending_approval: sent_for_approval (send again)
+    pending_approval --> approved: approved
+    pending_approval --> not_found: rejected
+    answered --> not_found: rejected
+    approved --> final_ready: final_ready (Claude)
+
+    answered --> supplier_draft: supplier_drafted (Claude)
+    not_found --> supplier_draft: supplier_drafted (Claude)
+    supplier_draft --> supplier_draft: supplier_drafted (redraft)
+    supplier_draft --> waiting_supplier: sent_to_ops
+    waiting_supplier --> waiting_supplier: sent_to_ops (send again)
+    supplier_draft --> supplier_answered: supplier_answered
+    waiting_supplier --> supplier_answered: supplier_answered
+    supplier_answered --> final_ready: final_ready (Claude)
+
+    final_ready --> completed: sent_to_sales
+    completed --> completed: sent_to_sales (send again)
+    completed --> [*]
+```
+
+| State | Meaning | Diagram step |
+|---|---|---|
+| `new` | No answer yet | 1 |
+| `answered` | The search found a price | 2 → A |
+| `not_found` | No price found, or the answer was marked not correct | 2 → B |
+| `pending_approval` | Sent to Operations for approval | A3 |
+| `approved` | Operations approved | A3 done |
+| `supplier_draft` | Claude drafted the supplier message | B3 |
+| `waiting_supplier` | Draft sent to Operations, who forward it to the supplier | B4 |
+| `supplier_answered` | The supplier's answer was recorded and saved | B5 |
+| `final_ready` | Claude wrote the final answer for Sales | A4 / B6 |
+| `completed` | The final answer was sent to Sales | A4 / B6 done |
+
+## Feature 1 — Search outcome (step 2)
+
+```mermaid
+stateDiagram-v2
+    [*] --> new
+    new --> answered: [[pricy:found]]
+    new --> not_found: [[pricy:not_found]]
+    answered --> not_found: follow-up finds nothing
+    not_found --> answered: follow-up finds a price
+```
+
+- **Trigger:** a search turn ends. Claude adds the marker as the last line (instructions are in [system_prompt.md](../src-tauri/src/system_prompt.md)). [`strip_outcome`](../src-tauri/src/workflow.rs) removes it and fires the event.
+- **No marker** (Claude only asked for missing details): the status stays the same.
+- Once a request has moved on (approval, supplier), follow-up searches no longer change its status.
+
+## Feature 2 — Operations approval (A3, A4)
+
+```mermaid
+stateDiagram-v2
+    answered --> pending_approval: Send for approval… (pick Ops people, mail opens)
+    pending_approval --> pending_approval: Send again…
+    pending_approval --> approved: Approved
+    approved --> final_ready: Claude writes the final answer (automatic)
+    pending_approval --> not_found: Not correct, ask supplier
+    answered --> not_found: Not correct, ask supplier
+    not_found --> supplier_draft: Claude drafts the supplier message (automatic)
+```
+
+| Action (button) | Event | Records in the chat |
+|---|---|---|
+| Send for approval… | `sent_for_approval` | "Sent for approval to …" with the request and proposed answer in the email |
+| Approved | `approved`, then step `final_from_approval` | "Approved by Operations", then a **Final answer for Sales** card |
+| Not correct — ask supplier | `rejected`, then step `draft_supplier` | "Answer marked as not correct", then a **Message to the supplier** card |
+
+## Feature 3 — Ask the supplier (B3, B4, B5, B6)
+
+```mermaid
+stateDiagram-v2
+    not_found --> supplier_draft: Draft supplier message (Claude)
+    supplier_draft --> supplier_draft: Redraft
+    supplier_draft --> waiting_supplier: Send to Operations… (mail opens)
+    waiting_supplier --> waiting_supplier: Send again…
+    waiting_supplier --> supplier_answered: Record supplier answer… (saved to Saved answers)
+    supplier_draft --> supplier_answered: Record supplier answer… (Ops already had it)
+    supplier_answered --> final_ready: Claude writes the final answer (automatic)
+```
+
+- **B3:** step `draft_supplier`. Claude writes a short message with every request detail and asks for the price, inclusions, availability and timing. It runs on the same Claude session with no tools.
+- **B4:** Operations forwards the draft to the supplier (WhatsApp or email, outside Pricy).
+- **B5:** the reply is pasted into *Record supplier answer*. It is saved as `workspace/sources/answers/<date>-<request>.md`, which the **Saved answers** source searches next time. This is the "database" in the diagram.
+- **B6:** step `final_from_supplier` writes the final answer, citing the supplier reply and its date.
+
+## Feature 4 — Final answer to Sales (A4, B6)
+
+```mermaid
+stateDiagram-v2
+    approved --> final_ready: Claude (final_from_approval)
+    supplier_answered --> final_ready: Claude (final_from_supplier)
+    final_ready --> completed: Send to Sales… (pick Sales people, mail opens)
+    completed --> completed: Send again…
+```
+
+If a final-answer step fails or is stopped, the request stays in `approved` / `supplier_answered` and the bar offers **Write final answer** to retry.
+
+## Token usage
+
+Every Claude turn (searches and steps) stores the usage reported by the CLI on the answer it produced:
+- input, cache write, cache read and output tokens;
+- API-equivalent cost;
+- duration and number of model calls.
+
+It is shown under each answer, and the chat header shows the total for the request.
+
+## Not covered yet
+
+- Approvals are recorded by the person running the request. Operations doesn't get an in-app inbox. That would need a shared backend, or Slack as the channel.
+- Emails open in the local mail app. Pricy doesn't send them or read replies.
+- **Saved answers** are local to each computer.

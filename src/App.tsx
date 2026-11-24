@@ -2,8 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { api, onStreamEvent, onTurnFinished, type Chat, type ClaudeStatus, type Message } from "./api";
+import {
+  api,
+  onStreamEvent,
+  onTurnFinished,
+  type Chat,
+  type ClaudeStatus,
+  type Message,
+  type WorkflowEvent,
+  type WorkflowStep,
+} from "./api";
 import { SettingsDialog } from "./SettingsDialog";
+import {
+  parseTeam,
+  SendDialog,
+  StatusPill,
+  SupplierAnswerDialog,
+  totalUsage,
+  UsageLine,
+  WorkflowBar,
+  type SendKind,
+  type TeamMember,
+} from "./Workflow";
 import { useSources, type SourceState } from "./useSources";
 import logo from "./assets/logo.png";
 import "./App.css";
@@ -33,6 +53,9 @@ export default function App() {
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [team, setTeam] = useState<TeamMember[]>([]);
+  const [sendKind, setSendKind] = useState<SendKind | null>(null);
+  const [recordingAnswer, setRecordingAnswer] = useState(false);
 
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
@@ -46,12 +69,17 @@ export default function App() {
   }, []);
   const refreshChats = useCallback(() => api.listChats().then(setChats).catch(showError), [showError]);
   const refreshStatus = useCallback(() => api.checkClaude().then(setStatus).catch(showError), [showError]);
+  const refreshTeam = useCallback(
+    () => api.getSettings().then((s) => setTeam(parseTeam(s.team))).catch(showError),
+    [showError],
+  );
   const src = useSources(showError);
 
   // Initial load + stream listeners.
   useEffect(() => {
     refreshChats();
     refreshStatus();
+    refreshTeam();
     api.runningChats().then((ids) => setRunning(new Set(ids)));
 
     const unlistenEvent = onStreamEvent((e) => {
@@ -82,7 +110,7 @@ export default function App() {
       unlistenEvent.then((f) => f());
       unlistenDone.then((f) => f());
     };
-  }, [refreshChats, refreshStatus]);
+  }, [refreshChats, refreshStatus, refreshTeam]);
 
   // Keyboard shortcuts: ⌘N new search, ⌘K search history, ⌘, settings.
   useEffect(() => {
@@ -130,12 +158,49 @@ export default function App() {
       }
       const userMsg = await api.sendMessage(chatId, text, [...src.active]);
       setInput("");
-      setRunning((prev) => new Set(prev).add(chatId!));
-      setStreaming((prev) => ({ ...prev, [chatId!]: { text: "", tools: [] } }));
+      markRunning(chatId);
       if (chatId === activeRef.current || !activeId) {
         setMessages((prev) => [...prev, userMsg]);
       }
       refreshChats();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  function markRunning(chatId: string) {
+    setRunning((prev) => new Set(prev).add(chatId));
+    setStreaming((prev) => ({ ...prev, [chatId]: { text: "", tools: [] } }));
+  }
+
+  function appendIfActive(chatId: string, added: Message[]) {
+    if (chatId === activeRef.current) setMessages((prev) => [...prev, ...added]);
+  }
+
+  /** A step Claude performs (supplier draft, final answer). */
+  async function runStep(step: WorkflowStep, supplierAnswer?: string) {
+    if (!activeId) return;
+    const chatId = activeId;
+    try {
+      const added = await api.runStep(chatId, step, supplierAnswer);
+      appendIfActive(chatId, added);
+      markRunning(chatId);
+    } catch (e) {
+      showError(e);
+    } finally {
+      refreshChats();
+      src.refreshSources();
+    }
+  }
+
+  /** A step done by a person (sent an email, approved…), optionally followed by a Claude step. */
+  async function workflowEvent(event: WorkflowEvent, recipients: string[] = [], then?: WorkflowStep) {
+    if (!activeId) return;
+    const chatId = activeId;
+    try {
+      appendIfActive(chatId, await api.workflowEvent(chatId, event, recipients));
+      await refreshChats();
+      if (then) await runStep(then);
     } catch (e) {
       showError(e);
     }
@@ -166,6 +231,7 @@ export default function App() {
   const isRunning = activeId ? running.has(activeId) : false;
   const live = activeId ? streaming[activeId] : undefined;
   const claudeMissing = status && !status.version;
+  const totals = useMemo(() => totalUsage(messages), [messages]);
 
   return (
     <div className="app">
@@ -204,6 +270,7 @@ export default function App() {
                     {running.has(c.id) && <span className="dot" />}
                     {c.title}
                   </span>
+                  {c.status !== "new" && <StatusPill status={c.status} />}
                   <button
                     className="icon-btn"
                     aria-label="Delete chat"
@@ -236,6 +303,12 @@ export default function App() {
             <h2 title={activeChat.title} onDoubleClick={() => renameChat(activeChat)}>
               {activeChat.title}
             </h2>
+            <StatusPill status={activeChat.status} />
+            {totals.tokens > 0 && (
+              <span className="muted small" title="Total for this request (API-equivalent cost reported by Claude Code)">
+                {totals.tokens.toLocaleString("en-US")} tokens · ${totals.cost.toFixed(3)}
+              </span>
+            )}
             <span className="muted small">{formatDate(activeChat.createdAt)}</span>
           </header>
         )}
@@ -284,7 +357,7 @@ export default function App() {
                     </div>
                   )}
                   {live.text ? (
-                    <Markdown text={live.text} />
+                    <Markdown text={live.text.replace(/\[\[pricy:(not_)?found\]\]/g, "")} />
                   ) : (
                     <div className="typing">
                       <span />
@@ -298,6 +371,18 @@ export default function App() {
             </div>
           )}
         </div>
+
+        {activeChat && (
+          <WorkflowBar
+            chat={activeChat}
+            messages={messages}
+            busy={isRunning}
+            onSend={setSendKind}
+            onEvent={(e, then) => workflowEvent(e, [], then)}
+            onStep={runStep}
+            onRecordAnswer={() => setRecordingAnswer(true)}
+          />
+        )}
 
         <form
           className="composer"
@@ -351,9 +436,36 @@ export default function App() {
           onClose={() => {
             setShowSettings(false);
             refreshStatus();
+            refreshTeam();
             src.refreshSources();
           }}
           onError={showError}
+        />
+      )}
+      {sendKind && activeChat && (
+        <SendDialog
+          kind={sendKind}
+          chat={activeChat}
+          messages={messages}
+          team={team}
+          onClose={() => setSendKind(null)}
+          onOpenSettings={() => {
+            setSendKind(null);
+            setShowSettings(true);
+          }}
+          onSent={(event, to) => {
+            setSendKind(null);
+            workflowEvent(event, to);
+          }}
+        />
+      )}
+      {recordingAnswer && (
+        <SupplierAnswerDialog
+          onClose={() => setRecordingAnswer(false)}
+          onSave={(text) => {
+            setRecordingAnswer(false);
+            runStep("final_from_supplier", text);
+          }}
         />
       )}
       {toast && <div className="toast">{toast}</div>}
@@ -377,7 +489,7 @@ function SourceBar({
       <span className="source-bar-label muted">Search in</span>
       {sources.map((s) => {
         const checked = active.has(s.id);
-        const unavailable = s.id === "whatsapp" && s.health === "missing";
+        const unavailable = s.files !== null && (s.health === "missing" || s.health === "empty");
         return (
           <label
             key={s.id}
@@ -386,14 +498,14 @@ function SourceBar({
             onClick={(e) => {
               if (unavailable) {
                 e.preventDefault();
-                onOpenSettings();
+                if (s.id === "whatsapp") onOpenSettings();
               }
             }}
           >
             <input type="checkbox" checked={checked && !unavailable} onChange={() => onToggle(s.id)} />
             <span className={`health ${s.health}`} />
             {s.label}
-            {unavailable && <span className="chip-note">attach</span>}
+            {unavailable && <span className="chip-note">{s.id === "whatsapp" ? "attach" : "empty"}</span>}
           </label>
         );
       })}
@@ -401,7 +513,32 @@ function SourceBar({
   );
 }
 
+const KIND_TITLE: Record<string, string> = {
+  supplier_draft: "Message to the supplier",
+  final: "Final answer for Sales",
+};
+
 function MessageView({ message, sources }: { message: Message; sources: SourceState[] }) {
+  if (message.role === "event") {
+    return (
+      <div className="event-row">
+        <span className="event-dot" />
+        <div className="event-body">
+          <Markdown text={message.content} />
+        </div>
+        <span className="muted small">{formatTime(message.createdAt)}</span>
+      </div>
+    );
+  }
+  if (message.role === "user" && message.kind === "action") {
+    return (
+      <div className="event-row action">
+        <span className="event-dot" />
+        <div className="event-body">{message.content}</div>
+        <span className="muted small">{formatTime(message.createdAt)}</span>
+      </div>
+    );
+  }
   if (message.role === "user") {
     const labels = message.sources.map((id) => sources.find((s) => s.id === id)?.label ?? id);
     return (
@@ -411,15 +548,16 @@ function MessageView({ message, sources }: { message: Message; sources: SourceSt
       </div>
     );
   }
+  const cardTitle = KIND_TITLE[message.kind];
   return (
-    <div className={`msg ${message.role}`}>
+    <div className={`msg ${message.role} ${cardTitle ? `card ${message.kind}` : ""}`}>
+      {cardTitle && <div className="card-title">{cardTitle}</div>}
       <Markdown text={message.content} />
-      {message.role === "assistant" && (
-        <div className="msg-actions">
-          <CopyButton text={message.content} />
-          <span className="muted small">{formatTime(message.createdAt)}</span>
-        </div>
-      )}
+      <div className="msg-meta">
+        {message.role === "assistant" && <CopyButton text={message.content} />}
+        {message.usage && <UsageLine usage={message.usage} />}
+        <span className="muted small">{formatTime(message.createdAt)}</span>
+      </div>
     </div>
   );
 }
@@ -468,7 +606,7 @@ function Markdown({ text }: { text: string }) {
 /** "mcp__claude_ai_Google_Drive__search_files" → "Drive: search files", "Grep" → "WhatsApp: grep". */
 function prettyTool(name: string, sources: SourceState[]) {
   if (name === "ToolSearch") return "Loading tools";
-  if (["Grep", "Read", "Glob"].includes(name)) return `WhatsApp: ${name.toLowerCase()}`;
+  if (["Grep", "Read", "Glob"].includes(name)) return `Local files: ${name.toLowerCase()}`;
   const m = name.match(/^mcp__(.+?)__(.+)$/);
   if (!m) return name;
   const norm = (c: string) => c.replace(/[^A-Za-z0-9_-]/g, "_");

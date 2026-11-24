@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Connector, type SourceFile, type SourceId, type SourceInfo } from "./api";
 
-export type SourceHealth = "ok" | "warn" | "missing" | "checking";
+export type SourceHealth = "ok" | "warn" | "missing" | "empty" | "checking";
 
 export interface SourceState extends SourceInfo {
   health: SourceHealth;
@@ -60,6 +60,12 @@ export function useSources(onError: (e: unknown) => void) {
       return files.length
         ? { ...s, health: "ok", statusText: `${files.length} chat export${files.length > 1 ? "s" : ""} attached` }
         : { ...s, health: "missing", statusText: "No chat export attached — add one in Settings" };
+    }
+    if (s.id === "saved") {
+      const n = s.files ?? 0;
+      return n
+        ? { ...s, health: "ok", statusText: `${n} supplier answer${n > 1 ? "s" : ""} saved` }
+        : { ...s, health: "empty", statusText: "Empty: supplier answers you record are saved here" };
     }
     if (connectors === null) return { ...s, health: "checking", statusText: "Checking connection…" };
     const c = connectors.find((c) => c.name === s.connector);

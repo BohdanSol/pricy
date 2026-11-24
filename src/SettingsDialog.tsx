@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type ClaudeStatus, type Settings } from "./api";
 import type { useSources } from "./useSources";
+import { parseTeam } from "./Workflow";
 
 const MODELS = [
   { value: "", label: "Default (Claude Code setting)" },
@@ -22,7 +23,7 @@ export function SettingsDialog({
   onClose: () => void;
   onError: (e: unknown) => void;
 }) {
-  const [settings, setSettings] = useState<Settings>({ claudePath: "", model: "" });
+  const [settings, setSettings] = useState<Settings>({ claudePath: "", model: "", team: "" });
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -99,6 +100,29 @@ export function SettingsDialog({
     <div className="overlay" onMouseDown={onClose}>
       <div className="dialog" onMouseDown={(e) => e.stopPropagation()}>
         <h2>Settings</h2>
+
+        <section>
+          <h3>Team</h3>
+          <p className="muted small">
+            Colleagues you send requests to for approval, supplier messages and final answers. One per line, as{" "}
+            <code>Name &lt;email&gt;</code> or just the email.
+          </p>
+          <textarea
+            className="team-input"
+            rows={4}
+            value={settings.team}
+            placeholder={"Anna Rossi <anna@company.com>\nmarco@company.com"}
+            onChange={(e) => setSettings({ ...settings, team: e.target.value })}
+          />
+          <p className="muted small">
+            {(() => {
+              const people = parseTeam(settings.team);
+              const lines = settings.team.split(/[\n,;]+/).filter((l) => l.trim()).length;
+              const bad = lines - people.length;
+              return `${people.length} member${people.length === 1 ? "" : "s"}${bad > 0 ? ` · ${bad} line${bad === 1 ? "" : "s"} without a valid email` : ""}`;
+            })()}
+          </p>
+        </section>
 
         <section>
           <h3>Data sources</h3>

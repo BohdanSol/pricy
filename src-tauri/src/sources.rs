@@ -39,6 +39,12 @@ pub const SOURCES: &[SourceDef] = &[
         hint: "Exported WhatsApp chats with suppliers (plain text, one message per line starting with a date).",
     },
     SourceDef {
+        id: "saved",
+        label: "Saved answers",
+        default_connector: None,
+        hint: "Supplier answers recorded in Pricy for earlier requests (Markdown files, one per request). Already confirmed by a supplier, so usually the most reliable recent price.",
+    },
+    SourceDef {
         id: "drive",
         label: "Drive",
         default_connector: Some("claude.ai Google Drive"),
@@ -52,17 +58,54 @@ pub fn get(id: &str) -> Option<&'static SourceDef> {
 
 /// Tool-name patterns treated as read-only. Applied per connector.
 const READ_PATTERNS: &[&str] = &[
-    "*search*", "*get_*", "*list*", "*read*", "*find*", "*fetch*", "*query*", "*download*", "*lookup*",
+    "*search*",
+    "*get_*",
+    "*list*",
+    "*read*",
+    "*find*",
+    "*fetch*",
+    "*query*",
+    "*download*",
+    "*lookup*",
 ];
 
 /// Built-in Claude Code tools Pricy never needs. Blocked explicitly, because
 /// restricting the built-in set with `--tools` also hides the claude.ai connectors.
 pub const BLOCKED_BUILTINS: &[&str] = &[
-    "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent", "Skill",
-    "Workflow", "SendMessage", "RemoteTrigger", "PushNotification", "Monitor", "ScheduleWakeup",
-    "CronCreate", "CronDelete", "CronList", "EnterWorktree", "ExitWorktree", "DesignSync",
-    "ShareOnboardingGuide", "ReportFindings", "TaskCreate", "TaskUpdate", "TaskStop", "TaskOutput",
-    "TaskGet", "TaskList", "TodoWrite", "KillShell", "BashOutput", "ExitPlanMode", "EnterPlanMode",
+    "Bash",
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "Agent",
+    "Skill",
+    "Workflow",
+    "SendMessage",
+    "RemoteTrigger",
+    "PushNotification",
+    "Monitor",
+    "ScheduleWakeup",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "EnterWorktree",
+    "ExitWorktree",
+    "DesignSync",
+    "ShareOnboardingGuide",
+    "ReportFindings",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskStop",
+    "TaskOutput",
+    "TaskGet",
+    "TaskList",
+    "TodoWrite",
+    "KillShell",
+    "BashOutput",
+    "ExitPlanMode",
+    "EnterPlanMode",
     "AskUserQuestion",
 ];
 
@@ -72,13 +115,46 @@ const LOCAL_READ_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 pub fn tool_prefix(connector: &str) -> String {
     let norm: String = connector
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("mcp__{norm}")
 }
 
+/// Folder (relative to the workspace) holding a local source's files.
+pub fn local_rel_dir(source_id: &str) -> Option<&'static str> {
+    match source_id {
+        "whatsapp" => Some("sources/whatsapp"),
+        "saved" => Some("sources/answers"),
+        _ => None,
+    }
+}
+
 pub fn whatsapp_dir(workspace: &Path) -> PathBuf {
     workspace.join("sources").join("whatsapp")
+}
+
+/// Visible file names in a local source's folder, sorted.
+pub fn local_files(workspace: &Path, source_id: &str) -> Vec<String> {
+    let Some(rel) = local_rel_dir(source_id) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = std::fs::read_dir(workspace.join(rel))
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_file())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| !n.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// A source the user selected for this search, with its resolved connector name.
@@ -94,7 +170,20 @@ pub struct ToolPolicy {
     pub prompt: String,
 }
 
-pub fn policy(selected: &[Selected], whatsapp_files: &[String]) -> ToolPolicy {
+/// For workflow steps (drafts, final answers): everything needed is already in the conversation.
+pub fn policy_no_tools() -> ToolPolicy {
+    let mut disallowed: Vec<String> = BLOCKED_BUILTINS.iter().map(|s| s.to_string()).collect();
+    disallowed.extend(LOCAL_READ_TOOLS.iter().map(|s| s.to_string()));
+    disallowed.push("ToolSearch".into());
+    ToolPolicy {
+        allowed: Vec::new(),
+        disallowed,
+        prompt: "## This step\n\nThis is a workflow step, not a search: use only the conversation so far and do not call any tools.\n".into(),
+    }
+}
+
+/// `local_files(id)` lists the files of a local source (WhatsApp, Saved answers).
+pub fn policy(selected: &[Selected], local_files: impl Fn(&str) -> Vec<String>) -> ToolPolicy {
     let mut allowed: Vec<String> = vec!["ToolSearch".into()];
     let mut disallowed: Vec<String> = BLOCKED_BUILTINS.iter().map(|s| s.to_string()).collect();
     let mut prompt = String::from("## Sources enabled for this search\n\n");
@@ -117,22 +206,24 @@ pub fn policy(selected: &[Selected], whatsapp_files: &[String]) -> ToolPolicy {
                     s.def.label.to_lowercase()
                 ));
             }
-            (None, "whatsapp") => {
+            (None, id) => {
                 uses_local = true;
-                if whatsapp_files.is_empty() {
-                    prompt.push_str("  No WhatsApp export is attached yet: tell the user to attach one in Settings.\n");
+                let files = local_files(id);
+                let dir = local_rel_dir(id).unwrap_or("sources");
+                if files.is_empty() {
+                    prompt.push_str(if id == "whatsapp" {
+                        "  No WhatsApp export is attached yet: tell the user to attach one in Settings.\n"
+                    } else {
+                        "  No saved answers yet.\n"
+                    });
                 } else {
                     prompt.push_str(&format!(
-                        "  Files (relative to the working directory): {}.\n  Use Grep with case-insensitive patterns (try place-name variants and abbreviations, e.g. \"FCO|Fiumicino\"), then Read around the matches for prices and dates. Quote the chat name, message date and sender as the source.\n",
-                        whatsapp_files
-                            .iter()
-                            .map(|f| format!("`sources/whatsapp/{f}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "  Folder `{dir}/` ({} file{}, relative to the working directory). Use Grep with case-insensitive patterns (try place-name variants and abbreviations, e.g. \"FCO|Fiumicino\"), then Read around the matches for prices and dates. Quote the file or chat name, the date and the sender as the source.\n",
+                        files.len(),
+                        if files.len() == 1 { "" } else { "s" },
                     ));
                 }
             }
-            _ => {}
         }
     }
 
@@ -146,7 +237,11 @@ pub fn policy(selected: &[Selected], whatsapp_files: &[String]) -> ToolPolicy {
         "\nSearch only the sources listed above; any other tool will be denied. If a source fails (for example it needs re-authentication), say which one and continue with the others.\n",
     );
 
-    ToolPolicy { allowed, disallowed, prompt }
+    ToolPolicy {
+        allowed,
+        disallowed,
+        prompt,
+    }
 }
 
 #[cfg(test)]
@@ -155,21 +250,37 @@ mod tests {
 
     #[test]
     fn prefix_normalises_connector_names() {
-        assert_eq!(tool_prefix("claude.ai Google Drive"), "mcp__claude_ai_Google_Drive");
-        assert_eq!(tool_prefix("claude.ai TINT-staging"), "mcp__claude_ai_TINT-staging");
+        assert_eq!(
+            tool_prefix("claude.ai Google Drive"),
+            "mcp__claude_ai_Google_Drive"
+        );
+        assert_eq!(
+            tool_prefix("claude.ai TINT-staging"),
+            "mcp__claude_ai_TINT-staging"
+        );
     }
 
     #[test]
     fn local_tools_only_when_whatsapp_selected() {
-        let drive = Selected { def: get("drive").unwrap(), connector: Some("claude.ai Google Drive".into()) };
-        let p = policy(&[drive], &[]);
-        assert!(p.allowed.iter().any(|a| a == "mcp__claude_ai_Google_Drive__*search*"));
+        let drive = Selected {
+            def: get("drive").unwrap(),
+            connector: Some("claude.ai Google Drive".into()),
+        };
+        let p = policy(&[drive], |_| Vec::new());
+        assert!(
+            p.allowed
+                .iter()
+                .any(|a| a == "mcp__claude_ai_Google_Drive__*search*")
+        );
         assert!(p.disallowed.iter().any(|d| d == "Read"));
 
-        let wa = Selected { def: get("whatsapp").unwrap(), connector: None };
-        let p = policy(&[wa], &["chat.txt".into()]);
+        let wa = Selected {
+            def: get("whatsapp").unwrap(),
+            connector: None,
+        };
+        let p = policy(&[wa], |_| vec!["chat.txt".into()]);
         assert!(p.allowed.iter().any(|a| a == "Grep"));
         assert!(!p.disallowed.iter().any(|d| d == "Grep"));
-        assert!(p.prompt.contains("sources/whatsapp/chat.txt"));
+        assert!(p.prompt.contains("sources/whatsapp/"));
     }
 }

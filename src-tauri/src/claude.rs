@@ -63,7 +63,10 @@ pub async fn list_connectors(bin: &Path, cwd: &Path) -> Result<Vec<Connector>, S
         .filter_map(|line| {
             let (name, rest) = line.split_once(": ")?;
             let (_, status) = rest.rsplit_once(" - ")?;
-            let status = status.trim_start_matches(['✔', '✗', '!', ' ']).trim().to_string();
+            let status = status
+                .trim_start_matches(['✔', '✗', '!', ' '])
+                .trim()
+                .to_string();
             Some(Connector {
                 name: name.trim().to_string(),
                 connected: status.eq_ignore_ascii_case("connected"),
@@ -173,6 +176,8 @@ pub struct TurnResult {
     pub is_error: bool,
     pub cancelled: bool,
     pub stderr: String,
+    /// Token usage and cost reported by the CLI for the whole turn.
+    pub usage: Option<Value>,
 }
 
 /// Run one turn. `on_event` is called for every streamed delta/tool use.
@@ -311,7 +316,28 @@ fn handle_line(
             if let Some(t) = v["result"].as_str() {
                 result.text = t.to_string();
             }
+            result.usage = Some(usage_summary(v));
         }
         _ => {}
     }
+}
+
+/// Compact usage record stored with each answer and shown under it.
+fn usage_summary(result: &Value) -> Value {
+    let u = &result["usage"];
+    let n = |v: &Value| v.as_u64().unwrap_or(0);
+    let models: Vec<&str> = result["modelUsage"]
+        .as_object()
+        .map(|m| m.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    serde_json::json!({
+        "inputTokens": n(&u["input_tokens"]),
+        "outputTokens": n(&u["output_tokens"]),
+        "cacheReadTokens": n(&u["cache_read_input_tokens"]),
+        "cacheCreationTokens": n(&u["cache_creation_input_tokens"]),
+        "costUsd": result["total_cost_usd"].as_f64().unwrap_or(0.0),
+        "durationMs": n(&result["duration_ms"]),
+        "numTurns": n(&result["num_turns"]),
+        "models": models,
+    })
 }
