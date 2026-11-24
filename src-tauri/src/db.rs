@@ -2,7 +2,7 @@
 //! Lives in the OS app-data dir (e.g. ~/Library/Application Support/com.coax.pricy/pricy.db).
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -33,6 +33,8 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub created_at: i64,
+    /// Sources searched for this message (user messages only), e.g. ["tint", "drive"].
+    pub sources: Vec<String>,
 }
 
 pub struct Db {
@@ -65,6 +67,7 @@ impl Db {
                  value TEXT NOT NULL
              );",
         )?;
+        migrate(&conn)?;
         Ok(Self { conn })
     }
 
@@ -109,13 +112,16 @@ impl Db {
     }
 
     pub fn rename_chat(&self, id: &str, title: &str) -> Result<()> {
-        self.conn
-            .execute("UPDATE chats SET title = ?2 WHERE id = ?1", params![id, title])?;
+        self.conn.execute(
+            "UPDATE chats SET title = ?2 WHERE id = ?1",
+            params![id, title],
+        )?;
         Ok(())
     }
 
     pub fn delete_chat(&self, id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM chats WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM chats WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -131,7 +137,7 @@ impl Db {
 
     pub fn list_messages(&self, chat_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, chat_id, role, content, created_at
+            "SELECT id, chat_id, role, content, created_at, sources
              FROM messages WHERE chat_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![chat_id], |r| {
@@ -141,16 +147,24 @@ impl Db {
                 role: r.get(2)?,
                 content: r.get(3)?,
                 created_at: r.get(4)?,
+                sources: split_sources(&r.get::<_, String>(5)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn add_message(&self, chat_id: &str, role: &str, content: &str) -> Result<Message> {
+    pub fn add_message(
+        &self,
+        chat_id: &str,
+        role: &str,
+        content: &str,
+        sources: &[String],
+    ) -> Result<Message> {
         let ts = now_ms();
         self.conn.execute(
-            "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![chat_id, role, content, ts],
+            "INSERT INTO messages (chat_id, role, content, created_at, sources)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![chat_id, role, content, ts, sources.join(",")],
         )?;
         let id = self.conn.last_insert_rowid();
         self.conn.execute(
@@ -163,6 +177,7 @@ impl Db {
             role: role.to_string(),
             content: content.to_string(),
             created_at: ts,
+            sources: sources.to_vec(),
         })
     }
 
@@ -171,9 +186,11 @@ impl Db {
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
@@ -200,4 +217,20 @@ fn row_to_chat(r: &rusqlite::Row) -> rusqlite::Result<Chat> {
         created_at: r.get(3)?,
         updated_at: r.get(4)?,
     })
+}
+
+fn split_sources(s: &str) -> Vec<String> {
+    s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect()
+}
+
+/// Schema migrations, tracked with `PRAGMA user_version`.
+fn migrate(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN sources TEXT NOT NULL DEFAULT '';
+             PRAGMA user_version = 1;",
+        )?;
+    }
+    Ok(())
 }

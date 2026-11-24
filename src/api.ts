@@ -17,6 +17,33 @@ export interface Message {
   role: Role;
   content: string;
   createdAt: number;
+  /** Source ids searched for this message (user messages). */
+  sources: string[];
+}
+
+export type SourceId = "tint" | "slack" | "whatsapp" | "drive";
+
+export interface SourceInfo {
+  id: SourceId;
+  label: string;
+  /** Default claude.ai connector name; null for local sources (WhatsApp). */
+  defaultConnector: string | null;
+  hint: string;
+  /** Connector actually used (default or overridden in Settings). */
+  connector: string | null;
+  active: boolean;
+}
+
+export interface Connector {
+  name: string;
+  status: string;
+  connected: boolean;
+}
+
+export interface SourceFile {
+  name: string;
+  size: number;
+  modifiedAt: number;
 }
 
 export interface Settings {
@@ -46,12 +73,20 @@ export const api = {
   renameChat: (chatId: string, title: string) => invoke<void>("rename_chat", { chatId, title }),
   deleteChat: (chatId: string) => invoke<void>("delete_chat", { chatId }),
   getMessages: (chatId: string) => invoke<Message[]>("get_messages", { chatId }),
-  sendMessage: (chatId: string, text: string) => invoke<Message>("send_message", { chatId, text }),
+  sendMessage: (chatId: string, text: string, sources: SourceId[]) =>
+    invoke<Message>("send_message", { chatId, text, sources }),
   stopMessage: (chatId: string) => invoke<void>("stop_message", { chatId }),
   runningChats: () => invoke<string[]>("running_chats"),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (s: Settings) => invoke<void>("save_settings", { ...s }),
   checkClaude: () => invoke<ClaudeStatus>("check_claude"),
+  listSources: () => invoke<SourceInfo[]>("list_sources"),
+  setActiveSources: (sources: SourceId[]) => invoke<void>("set_active_sources", { sources }),
+  setConnector: (sourceId: SourceId, connector: string) => invoke<void>("set_connector", { sourceId, connector }),
+  listConnectors: () => invoke<Connector[]>("list_connectors"),
+  listWhatsappFiles: () => invoke<SourceFile[]>("list_whatsapp_files"),
+  addWhatsappFiles: (paths: string[]) => invoke<string[]>("add_whatsapp_files", { paths }),
+  removeWhatsappFile: (name: string) => invoke<void>("remove_whatsapp_file", { name }),
 };
 
 export const onStreamEvent = (cb: (e: StreamEvent) => void): Promise<UnlistenFn> =>

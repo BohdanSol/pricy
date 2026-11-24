@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, onStreamEvent, onTurnFinished, type Chat, type ClaudeStatus, type Message } from "./api";
 import { SettingsDialog } from "./SettingsDialog";
+import { useSources, type SourceState } from "./useSources";
+import logo from "./assets/logo.png";
 import "./App.css";
 
 interface Streaming {
@@ -17,6 +19,9 @@ const EXAMPLES = [
   "Latest supplier price for a minivan transfer Rome FCO → city centre",
 ];
 
+const isMac = navigator.userAgent.includes("Mac");
+const MOD = isMac ? "⌘" : "Ctrl+";
+
 export default function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -24,6 +29,7 @@ export default function App() {
   const [streaming, setStreaming] = useState<Record<string, Streaming>>({});
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [input, setInput] = useState("");
+  const [filter, setFilter] = useState("");
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -32,14 +38,15 @@ export default function App() {
   activeRef.current = activeId;
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
 
-  const refreshChats = useCallback(() => api.listChats().then(setChats).catch(showError), []);
-  const refreshStatus = useCallback(() => api.checkClaude().then(setStatus).catch(showError), []);
-
-  function showError(e: unknown) {
+  const showError = useCallback((e: unknown) => {
     setToast(String(e));
     setTimeout(() => setToast(null), 6000);
-  }
+  }, []);
+  const refreshChats = useCallback(() => api.listChats().then(setChats).catch(showError), [showError]);
+  const refreshStatus = useCallback(() => api.checkClaude().then(setStatus).catch(showError), [showError]);
+  const src = useSources(showError);
 
   // Initial load + stream listeners.
   useEffect(() => {
@@ -77,6 +84,26 @@ export default function App() {
     };
   }, [refreshChats, refreshStatus]);
 
+  // Keyboard shortcuts: ⌘N new search, ⌘K search history, ⌘, settings.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(isMac ? e.metaKey : e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === "n") {
+        e.preventDefault();
+        newChat();
+      } else if (key === "k") {
+        e.preventDefault();
+        filterRef.current?.focus();
+      } else if (key === ",") {
+        e.preventDefault();
+        setShowSettings(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // Load messages when switching chats.
   useEffect(() => {
     if (!activeId) {
@@ -101,7 +128,7 @@ export default function App() {
         chatId = chat.id;
         setActiveId(chat.id);
       }
-      const userMsg = await api.sendMessage(chatId, text);
+      const userMsg = await api.sendMessage(chatId, text, [...src.active]);
       setInput("");
       setRunning((prev) => new Set(prev).add(chatId!));
       setStreaming((prev) => ({ ...prev, [chatId!]: { text: "", tools: [] } }));
@@ -114,7 +141,7 @@ export default function App() {
     }
   }
 
-  async function newChat() {
+  function newChat() {
     setActiveId(null);
     setInput("");
     inputRef.current?.focus();
@@ -134,6 +161,8 @@ export default function App() {
     refreshChats();
   }
 
+  const groups = useMemo(() => groupChats(chats, filter), [chats, filter]);
+  const activeChat = chats.find((c) => c.id === activeId);
   const isRunning = activeId ? running.has(activeId) : false;
   const live = activeId ? streaming[activeId] : undefined;
   const claudeMissing = status && !status.version;
@@ -142,49 +171,75 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <span className="logo">P</span> Pricy
+          <img src={logo} alt="Pricy" />
         </div>
         <button className="new-chat" onClick={newChat}>
-          + New search
+          <span>+ New search</span>
+          <kbd>{MOD}N</kbd>
         </button>
+        <div className="history-search">
+          <input
+            ref={filterRef}
+            value={filter}
+            placeholder={`Search history  ${MOD}K`}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => e.key === "Escape" && setFilter("")}
+          />
+        </div>
         <nav className="chat-list">
           {chats.length === 0 && <p className="muted small pad">No history yet</p>}
-          {chats.map((c) => (
-            <div
-              key={c.id}
-              className={`chat-item ${c.id === activeId ? "active" : ""}`}
-              onClick={() => setActiveId(c.id)}
-              onDoubleClick={() => renameChat(c)}
-              title={c.title}
-            >
-              <span className="chat-title">
-                {running.has(c.id) && <span className="dot" />}
-                {c.title}
-              </span>
-              <button
-                className="icon-btn"
-                aria-label="Delete chat"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteChat(c);
-                }}
-              >
-                ×
-              </button>
+          {chats.length > 0 && groups.length === 0 && <p className="muted small pad">Nothing matches “{filter}”</p>}
+          {groups.map(([label, items]) => (
+            <div key={label} className="chat-group">
+              <div className="group-label">{label}</div>
+              {items.map((c) => (
+                <div
+                  key={c.id}
+                  className={`chat-item ${c.id === activeId ? "active" : ""}`}
+                  onClick={() => setActiveId(c.id)}
+                  onDoubleClick={() => renameChat(c)}
+                  title={c.title}
+                >
+                  <span className="chat-title">
+                    {running.has(c.id) && <span className="dot" />}
+                    {c.title}
+                  </span>
+                  <button
+                    className="icon-btn"
+                    aria-label="Delete chat"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteChat(c);
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
           ))}
         </nav>
         <div className="sidebar-footer">
-          <button className="link-btn" onClick={() => setShowSettings(true)}>
-            ⚙ Settings
-          </button>
           <span className={`status ${status?.version ? "ok" : "bad"}`} title={status?.path ?? ""}>
+            <span className="status-dot" />
             {status === null ? "Checking Claude…" : status.version ? "Claude connected" : "Claude not found"}
           </span>
+          <button className="icon-text-btn" onClick={() => setShowSettings(true)} title={`Settings (${MOD},)`}>
+            ⚙ Settings
+          </button>
         </div>
       </aside>
 
       <main className="main">
+        {activeChat && (
+          <header className="chat-header">
+            <h2 title={activeChat.title} onDoubleClick={() => renameChat(activeChat)}>
+              {activeChat.title}
+            </h2>
+            <span className="muted small">{formatDate(activeChat.createdAt)}</span>
+          </header>
+        )}
+
         {claudeMissing && (
           <div className="banner">
             Claude Code CLI wasn't found on this computer. Install it and sign in, or set its path in{" "}
@@ -198,8 +253,12 @@ export default function App() {
         <div className="messages">
           {messages.length === 0 && !live ? (
             <div className="empty">
+              <div className="empty-dot" />
               <h1>Find a transfer price</h1>
-              <p className="muted">Describe the transfer (route, date, pax, service type). Pricy looks for an existing price in the shared data.</p>
+              <p className="muted">
+                Describe the transfer (route, date, pax, service type). Pricy looks for an existing price in the
+                shared data.
+              </p>
               <div className="examples">
                 {EXAMPLES.map((ex) => (
                   <button key={ex} onClick={() => send(ex)} disabled={!!claudeMissing}>
@@ -211,7 +270,7 @@ export default function App() {
           ) : (
             <div className="thread">
               {messages.map((m) => (
-                <MessageView key={m.id} role={m.role} content={m.content} />
+                <MessageView key={m.id} message={m} sources={src.sources} />
               ))}
               {isRunning && live && (
                 <div className="msg assistant">
@@ -219,12 +278,20 @@ export default function App() {
                     <div className="tools">
                       {live.tools.map((t, i) => (
                         <span key={i} className="tool-chip">
-                          {prettyTool(t)}
+                          {prettyTool(t, src.sources)}
                         </span>
                       ))}
                     </div>
                   )}
-                  {live.text ? <Markdown text={live.text} /> : <div className="typing">Searching…</div>}
+                  {live.text ? (
+                    <Markdown text={live.text} />
+                  ) : (
+                    <div className="typing">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  )}
                 </div>
               )}
               <div ref={bottomRef} />
@@ -239,36 +306,52 @@ export default function App() {
             if (!isRunning) send(input);
           }}
         >
-          <textarea
-            ref={inputRef}
-            value={input}
-            placeholder="Ask for a price… (Enter to send, Shift+Enter for a new line)"
-            rows={2}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                if (!isRunning) send(input);
-              }
-            }}
+          <SourceBar
+            sources={src.sources}
+            active={src.active}
+            onToggle={src.toggle}
+            onOpenSettings={() => setShowSettings(true)}
           />
-          {isRunning ? (
-            <button type="button" className="btn stop" onClick={() => api.stopMessage(activeId!)}>
-              Stop
-            </button>
-          ) : (
-            <button type="submit" className="btn primary" disabled={!input.trim() || !!claudeMissing}>
-              Send
-            </button>
-          )}
+          <div className="composer-box">
+            <textarea
+              ref={inputRef}
+              value={input}
+              placeholder="Describe the transfer request…"
+              rows={1}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  if (!isRunning) send(input);
+                }
+              }}
+            />
+            {isRunning ? (
+              <button type="button" className="btn stop" onClick={() => api.stopMessage(activeId!)}>
+                Stop
+              </button>
+            ) : (
+              <button
+              type="submit"
+              className="btn primary"
+              disabled={!input.trim() || !!claudeMissing || src.active.size === 0}
+              title={src.active.size === 0 ? "Select at least one source to search" : undefined}
+            >
+                Send
+              </button>
+            )}
+          </div>
+          <div className="composer-hint muted">Enter to send · Shift+Enter for a new line</div>
         </form>
       </main>
 
       {showSettings && (
         <SettingsDialog
+          sources={src}
           onClose={() => {
             setShowSettings(false);
             refreshStatus();
+            src.refreshSources();
           }}
           onError={showError}
         />
@@ -278,12 +361,82 @@ export default function App() {
   );
 }
 
-function MessageView({ role, content }: { role: Message["role"]; content: string }) {
-  if (role === "user") return <div className="msg user">{content}</div>;
+function SourceBar({
+  sources,
+  active,
+  onToggle,
+  onOpenSettings,
+}: {
+  sources: SourceState[];
+  active: Set<string>;
+  onToggle: (id: SourceState["id"]) => void;
+  onOpenSettings: () => void;
+}) {
   return (
-    <div className={`msg ${role}`}>
-      <Markdown text={content} />
+    <div className="source-bar" role="group" aria-label="Sources to search">
+      <span className="source-bar-label muted">Search in</span>
+      {sources.map((s) => {
+        const checked = active.has(s.id);
+        const unavailable = s.id === "whatsapp" && s.health === "missing";
+        return (
+          <label
+            key={s.id}
+            className={`source-chip ${checked ? "on" : ""} ${unavailable ? "unavailable" : ""}`}
+            title={`${s.hint}\n\n${s.statusText}`}
+            onClick={(e) => {
+              if (unavailable) {
+                e.preventDefault();
+                onOpenSettings();
+              }
+            }}
+          >
+            <input type="checkbox" checked={checked && !unavailable} onChange={() => onToggle(s.id)} />
+            <span className={`health ${s.health}`} />
+            {s.label}
+            {unavailable && <span className="chip-note">attach</span>}
+          </label>
+        );
+      })}
     </div>
+  );
+}
+
+function MessageView({ message, sources }: { message: Message; sources: SourceState[] }) {
+  if (message.role === "user") {
+    const labels = message.sources.map((id) => sources.find((s) => s.id === id)?.label ?? id);
+    return (
+      <div className="user-wrap">
+        <div className="msg user">{message.content}</div>
+        {labels.length > 0 && <div className="searched muted">Searched: {labels.join(" · ")}</div>}
+      </div>
+    );
+  }
+  return (
+    <div className={`msg ${message.role}`}>
+      <Markdown text={message.content} />
+      {message.role === "assistant" && (
+        <div className="msg-actions">
+          <CopyButton text={message.content} />
+          <span className="muted small">{formatTime(message.createdAt)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="mini-btn"
+      onClick={async () => {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied ? "✓ Copied" : "Copy"}
+    </button>
   );
 }
 
@@ -312,8 +465,41 @@ function Markdown({ text }: { text: string }) {
   );
 }
 
-function prettyTool(name: string) {
-  // mcp__server__tool → "server: tool"
+/** "mcp__claude_ai_Google_Drive__search_files" → "Drive: search files", "Grep" → "WhatsApp: grep". */
+function prettyTool(name: string, sources: SourceState[]) {
+  if (name === "ToolSearch") return "Loading tools";
+  if (["Grep", "Read", "Glob"].includes(name)) return `WhatsApp: ${name.toLowerCase()}`;
   const m = name.match(/^mcp__(.+?)__(.+)$/);
-  return m ? `${m[1]}: ${m[2]}` : name;
+  if (!m) return name;
+  const norm = (c: string) => c.replace(/[^A-Za-z0-9_-]/g, "_");
+  const source = sources.find((s) => s.connector && norm(s.connector) === m[1]);
+  return `${source?.label ?? m[1]}: ${m[2].replace(/_/g, " ")}`;
+}
+
+function groupChats(chats: Chat[], filter: string): [string, Chat[]][] {
+  const q = filter.trim().toLowerCase();
+  const startOfDay = new Date().setHours(0, 0, 0, 0);
+  const DAY = 86_400_000;
+  const buckets: [string, (t: number) => boolean][] = [
+    ["Today", (t) => t >= startOfDay],
+    ["Yesterday", (t) => t >= startOfDay - DAY],
+    ["Previous 7 days", (t) => t >= startOfDay - 7 * DAY],
+    ["Previous 30 days", (t) => t >= startOfDay - 30 * DAY],
+    ["Older", () => true],
+  ];
+  const out = new Map<string, Chat[]>();
+  for (const c of chats) {
+    if (q && !c.title.toLowerCase().includes(q)) continue;
+    const label = buckets.find(([, test]) => test(c.updatedAt))![0];
+    out.set(label, [...(out.get(label) ?? []), c]);
+  }
+  return [...out.entries()];
+}
+
+function formatDate(ms: number) {
+  return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function formatTime(ms: number) {
+  return new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }

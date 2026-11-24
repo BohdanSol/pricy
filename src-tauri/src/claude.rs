@@ -10,7 +10,68 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 
+use crate::sources::ToolPolicy;
+
 pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+
+/// Env vars set by a parent Claude Code session (e.g. when the app is started
+/// from a Claude Code terminal). Inherited, they make the child CLI hide the
+/// claude.ai connectors, so they are removed before spawning.
+fn is_parent_session_var(key: &str) -> bool {
+    key == "CLAUDECODE"
+        || key == "AI_AGENT"
+        || key == "CLAUDE_PID"
+        || key == "CLAUDE_EFFORT"
+        || key == "CLAUDE_AGENT_SDK_VERSION"
+        || key.starts_with("CLAUDE_CODE_")
+}
+
+/// A `claude` command with a clean environment.
+pub fn command(bin: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    for (key, _) in std::env::vars_os() {
+        if let Some(k) = key.to_str() {
+            if is_parent_session_var(k) {
+                cmd.env_remove(k);
+            }
+        }
+    }
+    cmd
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Connector {
+    pub name: String,
+    pub status: String,
+    pub connected: bool,
+}
+
+/// Connectors available to the CLI, from `claude mcp list`
+/// (lines like `claude.ai Slack: https://mcp.slack.com/mcp - ! Needs authentication`).
+pub async fn list_connectors(bin: &Path, cwd: &Path) -> Result<Vec<Connector>, String> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        command(bin).current_dir(cwd).args(["mcp", "list"]).output(),
+    )
+    .await
+    .map_err(|_| "Timed out while checking connectors".to_string())?
+    .map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let (name, rest) = line.split_once(": ")?;
+            let (_, status) = rest.rsplit_once(" - ")?;
+            let status = status.trim_start_matches(['✔', '✗', '!', ' ']).trim().to_string();
+            Some(Connector {
+                name: name.trim().to_string(),
+                connected: status.eq_ignore_ascii_case("connected"),
+                status,
+            })
+        })
+        .collect())
+}
 
 /// Locate the `claude` binary. GUI apps on macOS don't inherit the shell PATH,
 /// so we also check the usual install locations.
@@ -20,7 +81,11 @@ pub fn find_claude(override_path: Option<&str>) -> Option<PathBuf> {
         return p.is_file().then_some(p);
     }
 
-    let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
+    let exe = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     if let Some(path) = std::env::var_os("PATH") {
@@ -66,7 +131,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 pub async fn claude_version(bin: &Path) -> Result<String, String> {
-    let out = Command::new(bin)
+    let out = command(bin)
         .arg("--version")
         .output()
         .await
@@ -85,7 +150,11 @@ pub enum StreamEvent {
     /// A chunk of assistant text.
     Delta { chat_id: String, text: String },
     /// Claude started using a tool (data source lookups, later on).
-    Tool { chat_id: String, name: String, input: Value },
+    Tool {
+        chat_id: String,
+        name: String,
+        input: Value,
+    },
 }
 
 pub struct TurnRequest<'a> {
@@ -94,6 +163,7 @@ pub struct TurnRequest<'a> {
     pub prompt: &'a str,
     pub resume_session: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub policy: &'a ToolPolicy,
 }
 
 #[derive(Debug, Default)]
@@ -112,7 +182,7 @@ pub async fn run_turn(
     mut cancel: oneshot::Receiver<()>,
     on_event: impl Fn(StreamEvent),
 ) -> Result<TurnResult, String> {
-    let mut cmd = Command::new(req.bin);
+    let mut cmd = command(req.bin);
     cmd.current_dir(req.cwd)
         .args([
             "-p",
@@ -120,16 +190,19 @@ pub async fn run_turn(
             "stream-json",
             "--verbose",
             "--include-partial-messages",
-            // Isolate from the user's personal Claude Code config (CLAUDE.md, hooks, MCPs).
+            // Isolate from the user's personal Claude Code settings (CLAUDE.md, hooks, permissions).
+            // claude.ai connectors still load; only the allowed read tools can be used.
             "--setting-sources",
-            "",
-            "--strict-mcp-config",
-            // No built-in tools yet: data-source tools get added here later.
-            "--tools",
             "",
             "--system-prompt",
             SYSTEM_PROMPT,
+            "--append-system-prompt",
+            &req.policy.prompt,
         ])
+        .arg("--allowedTools")
+        .args(&req.policy.allowed)
+        .arg("--disallowedTools")
+        .args(&req.policy.disallowed)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -204,7 +277,8 @@ fn handle_line(
         Some("stream_event") => {
             let ev = &v["event"];
             // A new model message after a tool call: separate it from the previous text.
-            if ev["type"] == "message_start" && !streamed.is_empty() && !streamed.ends_with("\n\n") {
+            if ev["type"] == "message_start" && !streamed.is_empty() && !streamed.ends_with("\n\n")
+            {
                 streamed.push_str("\n\n");
                 on_event(StreamEvent::Delta {
                     chat_id: chat_id.to_string(),
