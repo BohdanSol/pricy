@@ -3,7 +3,8 @@
 Internal desktop tool for Sales / OPS to find quote prices quickly, using the company's shared data.
 
 **Data sources:** TINT, Slack and Google Drive through the user's own claude.ai connectors (read-only), plus WhatsApp chat exports (`.txt`) attached in Settings. Sales ticks which sources to search under the message box.
-**Output:** a short answer with the price, travel time, conditions and the source it came from.
+**Covers:** transfers and tours.
+**Output:** a short answer with the price, timing (travel time or tour duration), conditions and the source it came from.
 
 Architecture, data flow and how the build maps to the target workflow: [architecture/ARCHITECTURE.md](architecture/ARCHITECTURE.md).
 

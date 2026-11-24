@@ -24,13 +24,13 @@ pub const SOURCES: &[SourceDef] = &[
         id: "tint",
         label: "TINT",
         default_connector: Some("claude.ai TINT-staging"),
-        hint: "Bookings, services and prices in the touring platform. Usually the most authoritative source for existing prices.",
+        hint: "Bookings, services (transfers, tours) and prices in the touring platform. Usually the most authoritative source for existing prices.",
     },
     SourceDef {
         id: "slack",
         label: "Slack",
         default_connector: Some("claude.ai Slack"),
-        hint: "Team conversations where prices and supplier answers were discussed. Search by route, place names, supplier or booking number.",
+        hint: "Team conversations where prices and supplier answers were discussed. Search by route, tour or place names, supplier or booking number.",
     },
     SourceDef {
         id: "whatsapp",

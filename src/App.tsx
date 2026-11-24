@@ -15,8 +15,8 @@ interface Streaming {
 
 const EXAMPLES = [
   "2 pax, Matera to Rome, 18 May 2027 — private transfer. What's the price and travel time?",
-  "Did we already quote a transfer from Naples airport to Positano for 4 pax?",
-  "Latest supplier price for a minivan transfer Rome FCO → city centre",
+  "Private walking tour of the Vatican Museums for 6 pax in June — what did we quote last time?",
+  "Latest supplier price for an Amalfi Coast boat tour, 4 pax",
 ];
 
 const isMac = navigator.userAgent.includes("Mac");
@@ -254,9 +254,9 @@ export default function App() {
           {messages.length === 0 && !live ? (
             <div className="empty">
               <div className="empty-dot" />
-              <h1>Find a transfer price</h1>
+              <h1>Find a price for a transfer or tour</h1>
               <p className="muted">
-                Describe the transfer (route, date, pax, service type). Pricy looks for an existing price in the
+                Describe the service (transfer or tour, date, pax, places, service type). Pricy looks for an existing price in the
                 shared data.
               </p>
               <div className="examples">
@@ -316,7 +316,7 @@ export default function App() {
             <textarea
               ref={inputRef}
               value={input}
-              placeholder="Describe the transfer request…"
+              placeholder="Describe the transfer or tour request…"
               rows={1}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {

@@ -1,6 +1,6 @@
 # Pricy — architecture
 
-Pricy is a desktop app for Sales and Operations that finds an existing price (and estimated travel time) for a transfer request by searching the company's shared data: TINT, Slack, WhatsApp supplier chats and Google Drive price tables.
+Pricy is a desktop app for Sales and Operations that finds an existing price for a service in a request — mainly transfers (with travel time) and tours — by searching the company's shared data: TINT, Slack, WhatsApp supplier chats and Google Drive price tables.
 
 Target workflow: [expected_workflow.png](expected_workflow.png). How the current build covers it: [Workflow coverage](#workflow-coverage).
 
