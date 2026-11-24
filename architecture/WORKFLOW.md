@@ -85,7 +85,7 @@ stateDiagram-v2
 | Action (button) | Event | Records in the chat |
 |---|---|---|
 | Send for approval… | `sent_for_approval` | "Sent for approval to …" with the request and proposed answer in the email |
-| Approved | `approved`, then step `final_from_approval` | "Approved by Operations", then a **Final answer for Sales** card |
+| Approved… (pick who approved, plus the chosen option / note) | `approved`, then step `final_from_approval` | "Approved by Marco: Option 2…", then a **Supplier Notes for Sales** card |
 | Not correct — ask supplier | `rejected`, then step `draft_supplier` | "Answer marked as not correct", then a **Message to the supplier** card |
 
 ## Feature 3 — Ask the supplier (B3, B4, B5, B6)
@@ -101,10 +101,10 @@ stateDiagram-v2
     supplier_answered --> final_ready: Claude writes the final answer (automatic)
 ```
 
-- **B3:** step `draft_supplier`. Claude writes a short message with every request detail and asks for the price, inclusions, availability and timing. It runs on the same Claude session with no tools.
+- **B3:** step `draft_supplier`. Claude fills the fixed supplier template (Dear Team… Date, Number of Pax, Luggage / No Luggage, Service Type, Itinerary, Pick-up, Drop-off… Best regards,) from the request. Unknown fields become "To be confirmed". It runs on the same Claude session with no tools.
 - **B4:** Operations forwards the draft to the supplier (WhatsApp or email, outside Pricy).
 - **B5:** the reply is pasted into *Record supplier answer*. It is saved as `workspace/sources/answers/<date>-<request>.md`, which the **Saved answers** source searches next time. This is the "database" in the diagram.
-- **B6:** step `final_from_supplier` writes the final answer, citing the supplier reply and its date.
+- **B6:** step `final_from_supplier` writes the Supplier Notes from the supplier reply. Whoever forwarded the answer is recorded as the approver.
 
 ## Feature 4 — Final answer to Sales (A4, B6)
 
@@ -117,6 +117,33 @@ stateDiagram-v2
 ```
 
 If a final-answer step fails or is stopped, the request stays in `approved` / `supplier_answered` and the bar offers **Write final answer** to retry.
+
+## Operations approval information (the search answer)
+
+The search answer is what Operations reviews (it is also the body of the *Send for approval…* email). Claude always structures it with these sections ([system_prompt.md](../src-tauri/src/system_prompt.md)):
+
+1. **Price & Supplier**: every supplier and pricing option, each as Net Price; with several options, which one goes to Sales.
+2. **Price Validity**: the date or period each price is valid from; seasonal or date-specific.
+3. **Price Source & Accuracy**: where each price was found; exact match or not; details of the similar service used; estimates and closest matches marked.
+4. **Vehicle Type**: Japan and South Korea only; the vehicle checked for each quote.
+5. **Important Notes & Special Requirements**: child seats, wheelchair access, luggage capacity, special passenger needs, extra costs or services.
+6. **Sales Request Summary**: service, date, location, participants, itinerary, special requirements.
+
+## Supplier Notes (the final answer for Sales)
+
+Both branches end with the Supplier Notes. Sales copies them into the Supplier Notes section in TINT:
+
+```
+Service Name & Description: one sentence
+Price Requested By:          Settings → Your name
+Price Approved By:           who approved (A3) or forwarded the supplier answer (B5)
+Net Price:                   … (Net Price)
+Supplier Name:
+Are there additional quotes from other suppliers? Yes / No, and the options
+Claude Output Link:          Pricy request "<title>" (<date>, ID <id>)
+```
+
+Pricy requests are stored locally, so there is no shareable URL for "Claude Output Link". The request title, date and ID identify it instead.
 
 ## Token usage
 

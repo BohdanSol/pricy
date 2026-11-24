@@ -165,8 +165,12 @@ impl Action {
     pub fn label(self) -> &'static str {
         match self {
             Action::DraftSupplier => "Draft a message to the supplier",
-            Action::FinalFromApproval => "Write the final answer (approved by Operations)",
-            Action::FinalFromSupplier => "Write the final answer from the supplier's reply",
+            Action::FinalFromApproval => {
+                "Write the Supplier Notes for Sales (approved by Operations)"
+            }
+            Action::FinalFromSupplier => {
+                "Write the Supplier Notes for Sales from the supplier's reply"
+            }
         }
     }
 
@@ -195,18 +199,98 @@ impl Action {
         }
     }
 
-    pub fn prompt(self, supplier_answer: Option<&str>) -> String {
-        const FINAL: &str = "Write the final answer for the sales rep: the request details (date, pax, service), the price with what it covers (per vehicle / group / person, inclusions), timing (travel time or tour duration), conditions, and the source with its date. Only state what the conversation and sources actually say: write \"not stated\" for anything unknown (e.g. inclusions) instead of assuming. Keep it short so it can be pasted to a client-facing colleague. Output only the final answer, with no outcome marker.";
+    pub fn prompt(self, ctx: &StepContext) -> String {
         match self {
-            Action::DraftSupplier => "Draft a message to the supplier asking for a quote for this request. Include every known detail (date, pax, service type, itinerary or tour details, pick-up / drop-off, notes) and ask for the price (per vehicle / group / person), what is included, availability, and the travel time or tour duration. Address it to the supplier found earlier if there is one. Keep it short and polite, in English unless the earlier supplier conversation was in another language. Output only the message text, with no commentary and no outcome marker.".into(),
-            Action::FinalFromApproval => format!("Operations approved the price you found above. {FINAL}"),
+            Action::DraftSupplier => {
+                format!("{SUPPLIER_MESSAGE_INSTRUCTIONS}\n\n{SUPPLIER_MESSAGE_TEMPLATE}")
+            }
+            Action::FinalFromApproval => format!(
+                "Operations approved the price you found above.{}\n\n{}",
+                ctx.note
+                    .as_deref()
+                    .filter(|n| !n.trim().is_empty())
+                    .map(|n| format!(
+                        " Their choice / note: \"{}\". Use the option they chose.",
+                        n.trim()
+                    ))
+                    .unwrap_or_default(),
+                supplier_notes(ctx)
+            ),
             Action::FinalFromSupplier => format!(
-                "The supplier answered (recorded on {}):\n\n\"\"\"\n{}\n\"\"\"\n\n{FINAL} The source is this supplier reply.",
+                "The supplier answered (recorded on {}):\n\n\"\"\"\n{}\n\"\"\"\n\nUse this supplier reply as the price.\n\n{}",
                 today(),
-                supplier_answer.unwrap_or("").trim()
+                ctx.supplier_answer.as_deref().unwrap_or("").trim(),
+                supplier_notes(ctx)
             ),
         }
     }
+}
+
+/// What a workflow step needs to know beyond the conversation.
+pub struct StepContext {
+    /// Sales representative who requested the price (Settings → Your name).
+    pub requester: Option<String>,
+    /// Operations representative who approved / forwarded the price.
+    pub approver: Option<String>,
+    /// Operations' choice or note when approving.
+    pub note: Option<String>,
+    pub supplier_answer: Option<String>,
+    /// Stands in for "Claude Output Link": Pricy requests are local, so there is no URL.
+    pub request_ref: String,
+}
+
+const SUPPLIER_MESSAGE_INSTRUCTIONS: &str = "Fill in the message Operations will send to the supplier to request a quotation for this request. Use exactly the template below: keep its wording and line order, and only fill in the fields. Rules:
+- Fill every field from the request and the conversation.
+- Number of Pax: adults + children, with the split if there are children (e.g. \"3 (2 adults, 1 child, booster seat required)\").
+- Luggage / No Luggage: \"No Luggage\", or the counts (e.g. \"Luggage: 2 full size suitcases, 2 hand luggage\"); \"To be confirmed\" if unknown.
+- Service Type: choose one of Tours / Transfers / Round-trip / Others (Transfer only + One way = Transfers; Transfer only + Return = Round-trip; Vehicle and guide or Guide only = Tours; Vehicle only = Others, with the duration). Add the duration, entrance tickets and start / end times next to it when known.
+- Mention a mobility need or child seat in the Itinerary line or after Drop-off only if the request states it.
+- Itinerary: fill it for tours or multi-stop services, otherwise write \"N/A\".
+- Write \"To be confirmed\" for any other detail that is not known. Never invent details.
+- Output only the filled message, with no commentary and no outcome marker.";
+
+const SUPPLIER_MESSAGE_TEMPLATE: &str = "Dear Team,
+Hope you are doing well.
+We would like to request a quotation for the following service.
+Please see the details below:
+
+Date:
+Number of Pax:
+Luggage / No Luggage:
+Service Type: Tours / Transfers / Round-trip / Others
+Itinerary (if relevant):
+Pick-up:
+Drop-off:
+
+We would appreciate it if you could confirm whether you can accommodate this request and provide us with a price for this service.
+We look forward to your response and thank you in advance for your assistance.
+Best regards,";
+
+fn supplier_notes(ctx: &StepContext) -> String {
+    let requester = ctx
+        .requester
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Not stated");
+    let approver = ctx
+        .approver
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Not stated");
+    format!(
+        "Now write the Supplier Notes for the Sales representative, who copies them into the Supplier Notes section in TINT. Use exactly this format, one field per line, with the field names in bold:
+
+**Service Name & Description:** one sentence describing the service (date, pax, route or tour).
+**Price Requested By:** {requester}
+**Price Approved By:** {approver}
+**Net Price:** the approved price with currency and unit, followed by \"(Net Price)\".
+**Supplier Name:** the supplier of that price.
+**Are there additional quotes from other suppliers?** Yes or No. If Yes, list every other option as \"Supplier – Net Price\".
+**Claude Output Link:** {}
+
+Only use facts from the conversation; write \"Not stated\" for anything unknown. Output only the Supplier Notes, with no commentary and no outcome marker.",
+        ctx.request_ref
+    )
 }
 
 // ---------- saved answers (B5) ----------
@@ -239,7 +323,12 @@ pub fn save_answer(
 
 /// Today's date as YYYY-MM-DD (UTC), without a date library.
 pub fn today() -> String {
-    let days = crate::db::now_ms().div_euclid(86_400_000);
+    date_of(crate::db::now_ms())
+}
+
+/// A millisecond timestamp as YYYY-MM-DD (UTC).
+pub fn date_of(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
     // Civil-from-days (Howard Hinnant).
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -315,5 +404,38 @@ mod tests {
         let d = today();
         assert_eq!(d.len(), 10);
         assert!(d.starts_with("20"));
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    fn ctx() -> StepContext {
+        StepContext {
+            requester: Some("Anna".into()),
+            approver: Some("Marco".into()),
+            note: Some("Option 2".into()),
+            supplier_answer: Some("€640 net".into()),
+            request_ref: "Pricy request \"X\"".into(),
+        }
+    }
+
+    #[test]
+    fn supplier_message_uses_template() {
+        let p = Action::DraftSupplier.prompt(&ctx());
+        assert!(p.contains("Dear Team,\nHope you are doing well."));
+        assert!(p.contains("Luggage / No Luggage:"));
+    }
+
+    #[test]
+    fn supplier_notes_carry_names_and_choice() {
+        let p = Action::FinalFromApproval.prompt(&ctx());
+        assert!(p.contains("**Price Requested By:** Anna"));
+        assert!(p.contains("**Price Approved By:** Marco"));
+        assert!(p.contains("Option 2"));
+        let p = Action::FinalFromSupplier.prompt(&ctx());
+        assert!(p.contains("€640 net"));
+        assert!(p.contains("**Claude Output Link:** Pricy request"));
     }
 }

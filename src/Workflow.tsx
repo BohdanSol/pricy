@@ -9,12 +9,12 @@ export const STATUS: Record<ChatStatus, { label: string; tone: "muted" | "accent
   answered: { label: "Price found", tone: "accent", hint: "Send it to Operations for approval, or mark it as not correct." },
   not_found: { label: "No price", tone: "warn", hint: "Draft a message to ask the supplier." },
   pending_approval: { label: "Waiting for approval", tone: "warn", hint: "Mark it approved or not correct once Operations replies." },
-  approved: { label: "Approved", tone: "ok", hint: "Write the final answer for Sales." },
+  approved: { label: "Approved", tone: "ok", hint: "Write the Supplier Notes for Sales." },
   supplier_draft: { label: "Supplier draft", tone: "accent", hint: "Send the draft to Operations so they can forward it to the supplier." },
   waiting_supplier: { label: "Waiting for supplier", tone: "warn", hint: "Paste the supplier's answer when Operations forwards it." },
-  supplier_answered: { label: "Supplier answered", tone: "ok", hint: "Write the final answer for Sales." },
-  final_ready: { label: "Final answer ready", tone: "ok", hint: "Send the final answer to Sales." },
-  completed: { label: "Completed", tone: "ok", hint: "The final answer was sent to Sales." },
+  supplier_answered: { label: "Supplier answered", tone: "ok", hint: "Write the Supplier Notes for Sales." },
+  final_ready: { label: "Notes ready", tone: "ok", hint: "Send the Supplier Notes to Sales (they copy them into TINT)." },
+  completed: { label: "Completed", tone: "ok", hint: "The Supplier Notes were sent to Sales." },
 };
 
 export function StatusPill({ status }: { status: ChatStatus }) {
@@ -57,7 +57,7 @@ const SEND_EVENT: Record<SendKind, WorkflowEvent> = {
 const SEND_TITLE: Record<SendKind, string> = {
   approval: "Send for approval",
   ops: "Send to Operations",
-  sales: "Send final answer",
+  sales: "Send Supplier Notes to Sales",
 };
 
 function lastOf(messages: Message[], pred: (m: Message) => boolean) {
@@ -80,7 +80,7 @@ function draftEmail(kind: SendKind, chat: Chat, messages: Message[]) {
     const answer = lastOf(messages, (m) => m.role === "assistant" && m.kind === "chat")?.content ?? "";
     return {
       subject: `Approval needed: ${chat.title}`,
-      body: `Hi,\n\nPlease check this price before it goes to the client.\n\nREQUEST\n${request}\n\nPROPOSED ANSWER\n${plain(answer)}\n\nReply "OK" to approve, or tell me what's wrong.\n\nSent from Pricy`,
+      body: `Hi,\n\nPlease check this price before it goes to Sales.\n\nREQUEST\n${request}\n\nPROPOSED ANSWER\n${plain(answer)}\n\nReply "OK" to approve. If there are several options, tell me which price to communicate to the Sales team. If something is wrong, tell me what.\n\nSent from Pricy`,
     };
   }
   if (kind === "ops") {
@@ -91,7 +91,10 @@ function draftEmail(kind: SendKind, chat: Chat, messages: Message[]) {
     };
   }
   const final = lastOf(messages, (m) => m.kind === "final")?.content ?? "";
-  return { subject: `Final price: ${chat.title}`, body: `${plain(final)}\n\nSent from Pricy` };
+  return {
+    subject: `Supplier Notes: ${chat.title}`,
+    body: `Hi,\n\nHere are the Supplier Notes for this service. Please copy them into the Supplier Notes section in TINT.\n\n${plain(final)}\n\nSent from Pricy`,
+  };
 }
 
 // ---------- workflow bar ----------
@@ -104,6 +107,7 @@ export function WorkflowBar({
   onEvent,
   onStep,
   onRecordAnswer,
+  onApprove,
 }: {
   chat: Chat;
   messages: Message[];
@@ -112,6 +116,7 @@ export function WorkflowBar({
   onEvent: (e: WorkflowEvent, then?: WorkflowStep) => void;
   onStep: (s: WorkflowStep, supplierAnswer?: string) => void;
   onRecordAnswer: () => void;
+  onApprove: () => void;
 }) {
   const status = chat.status;
   const lastSupplierAnswer = () => {
@@ -129,12 +134,12 @@ export function WorkflowBar({
       actions.push({ label: "Draft supplier message", primary: true, run: () => onStep("draft_supplier") });
       break;
     case "pending_approval":
-      actions.push({ label: "Approved", primary: true, run: () => onEvent("approved", "final_from_approval") });
+      actions.push({ label: "Approved…", primary: true, run: onApprove });
       actions.push({ label: "Not correct — ask supplier", run: () => onEvent("rejected", "draft_supplier") });
       actions.push({ label: "Send again…", run: () => onSend("approval") });
       break;
     case "approved":
-      actions.push({ label: "Write final answer", primary: true, run: () => onStep("final_from_approval") });
+      actions.push({ label: "Write Supplier Notes", primary: true, run: () => onStep("final_from_approval") });
       break;
     case "supplier_draft":
       actions.push({ label: "Send to Operations…", primary: true, run: () => onSend("ops") });
@@ -147,7 +152,7 @@ export function WorkflowBar({
       break;
     case "supplier_answered":
       actions.push({
-        label: "Write final answer",
+        label: "Write Supplier Notes",
         primary: true,
         run: () => onStep("final_from_supplier", lastSupplierAnswer()),
       });
@@ -271,32 +276,126 @@ export function SendDialog({
   );
 }
 
+// ---------- approval (Operations) ----------
+
+/** Emails the last message of `kind` was sent to, e.g. who was asked for approval. */
+export function lastRecipients(messages: Message[], kind: "sent_for_approval" | "sent_to_ops"): string[] {
+  const ev = lastOf(messages, (m) => m.role === "event" && m.kind === kind);
+  const list = ev?.content.split(/ to |: /).pop() ?? "";
+  return list.split(",").map((e) => e.trim()).filter(Boolean);
+}
+
+function PersonPicker({
+  label,
+  team,
+  value,
+  onChange,
+}: {
+  label: string;
+  team: TeamMember[];
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const listId = "team-names";
+  return (
+    <label>
+      {label}
+      <input list={listId} value={value} placeholder="Name" onChange={(e) => onChange(e.target.value)} />
+      <datalist id={listId}>
+        {team.map((p) => (
+          <option key={p.email} value={p.name}>
+            {p.email}
+          </option>
+        ))}
+      </datalist>
+    </label>
+  );
+}
+
+function suggestedName(team: TeamMember[], emails: string[]) {
+  return emails.length === 1 ? (team.find((p) => p.email === emails[0])?.name ?? emails[0]) : "";
+}
+
+export function ApproveDialog({
+  team,
+  suggested,
+  onClose,
+  onApprove,
+}: {
+  team: TeamMember[];
+  suggested: string[];
+  onClose: () => void;
+  onApprove: (approver: string, note: string) => void;
+}) {
+  const [approver, setApprover] = useState(suggestedName(team, suggested));
+  const [note, setNote] = useState("");
+  return (
+    <div className="overlay" onMouseDown={onClose}>
+      <div className="dialog" onMouseDown={(e) => e.stopPropagation()}>
+        <h2>Price approved</h2>
+        <PersonPicker label="Approved by (Operations)" team={team} value={approver} onChange={setApprover} />
+        <label>
+          Chosen option / note <span className="muted">(if there were several prices)</span>
+          <textarea
+            className="email-body"
+            rows={3}
+            value={note}
+            placeholder="e.g. Option 2 — Sud Transfer, €620 Net Price"
+            onChange={(e) => setNote(e.target.value)}
+          />
+        </label>
+        <p className="muted small">Claude then writes the Supplier Notes for Sales.</p>
+        <div className="row end">
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" disabled={!approver.trim()} onClick={() => onApprove(approver.trim(), note.trim())}>
+            Approve and write notes
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- supplier answer dialog ----------
 
-export function SupplierAnswerDialog({ onClose, onSave }: { onClose: () => void; onSave: (text: string) => void }) {
+export function SupplierAnswerDialog({
+  team,
+  suggested,
+  onClose,
+  onSave,
+}: {
+  team: TeamMember[];
+  suggested: string[];
+  onClose: () => void;
+  onSave: (text: string, approver: string) => void;
+}) {
   const [text, setText] = useState("");
+  const [approver, setApprover] = useState(suggestedName(team, suggested));
   return (
     <div className="overlay" onMouseDown={onClose}>
       <div className="dialog wide" onMouseDown={(e) => e.stopPropagation()}>
         <h2>Record supplier answer</h2>
         <p className="muted small">
           Paste the supplier's reply as Operations forwarded it. It is saved to <strong>Saved answers</strong> so
-          future searches find it, then Claude writes the final answer for Sales.
+          future searches find it, then Claude writes the Supplier Notes for Sales.
         </p>
         <textarea
           className="email-body"
           autoFocus
           rows={10}
           value={text}
-          placeholder="e.g. Sedan Matera → FCO, 18 May 2027, 2 pax: €640, 4h40, tolls included."
+          placeholder="e.g. Sedan Matera → FCO, 18 May 2027, 2 pax: €640 net, 4h40, luggage included."
           onChange={(e) => setText(e.target.value)}
         />
+        <PersonPicker label="Forwarded / approved by (Operations)" team={team} value={approver} onChange={setApprover} />
         <div className="row end">
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn primary" disabled={!text.trim()} onClick={() => onSave(text)}>
-            Save and write final answer
+          <button className="btn primary" disabled={!text.trim()} onClick={() => onSave(text, approver.trim())}>
+            Save and write Supplier Notes
           </button>
         </div>
       </div>

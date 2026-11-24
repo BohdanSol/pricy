@@ -23,7 +23,7 @@ export function SettingsDialog({
   onClose: () => void;
   onError: (e: unknown) => void;
 }) {
-  const [settings, setSettings] = useState<Settings>({ claudePath: "", model: "", team: "" });
+  const [settings, setSettings] = useState<Settings>({ claudePath: "", model: "", team: "", userName: "", referenceLinks: "" });
   const [status, setStatus] = useState<ClaudeStatus | null>(null);
   const [checking, setChecking] = useState(false);
 
@@ -102,6 +102,18 @@ export function SettingsDialog({
         <h2>Settings</h2>
 
         <section>
+          <h3>You</h3>
+          <label>
+            Your name <span className="muted">(“Price Requested By” in the Supplier Notes)</span>
+            <input
+              value={settings.userName}
+              placeholder="e.g. Anna Rossi"
+              onChange={(e) => setSettings({ ...settings, userName: e.target.value })}
+            />
+          </label>
+        </section>
+
+        <section>
           <h3>Team</h3>
           <p className="muted small">
             Colleagues you send requests to for approval, supplier messages and final answers. One per line, as{" "}
@@ -138,6 +150,11 @@ export function SettingsDialog({
             >
               Manage connectors on claude.ai
             </a>
+          </p>
+          <p className="muted small">
+            A connector that works on claude.ai can still need its own sign-in for Claude Code. If one shows "Needs
+            sign-in", run <code>claude</code> in a terminal, type <code>/mcp</code>, pick the connector and sign in, then
+            press Re-check.
           </p>
 
           <div className="source-list">
@@ -205,6 +222,21 @@ export function SettingsDialog({
             </button>
             {src.connectorsError && <span className="status bad">{src.connectorsError}</span>}
           </div>
+        </section>
+
+        <section>
+          <h3>Reference links</h3>
+          <p className="muted small">
+            Train booking sites (Japan, Italy), ticket sites and other resources Claude should use first. One per line,
+            optionally with a label, e.g. <code>Italy trains: https://www.trenitalia.com</code>.
+          </p>
+          <textarea
+            className="team-input"
+            rows={4}
+            value={settings.referenceLinks}
+            placeholder={"Japan trains: https://…\nItaly trains: https://…\nVatican Museums tickets: https://…"}
+            onChange={(e) => setSettings({ ...settings, referenceLinks: e.target.value })}
+          />
         </section>
 
         <section>

@@ -40,7 +40,8 @@ flowchart LR
 | Sources and tool policy | [src-tauri/src/sources.rs](../src-tauri/src/sources.rs) | Source definitions, per-turn allow/deny rules and instructions |
 | Workflow | [src-tauri/src/workflow.rs](../src-tauri/src/workflow.rs), [src/Workflow.tsx](../src/Workflow.tsx) | Request state machine, Claude steps (drafts, final answers), send dialog, token usage |
 | Storage | [src-tauri/src/db.rs](../src-tauri/src/db.rs) | SQLite schema and migrations |
-| Assistant instructions | [src-tauri/src/system_prompt.md](../src-tauri/src/system_prompt.md) | How to answer: price, conditions, source, date; never invent prices |
+| Assistant instructions | [src-tauri/src/system_prompt.md](../src-tauri/src/system_prompt.md) | How to answer: Net Price, conditions, source, date; never invent prices |
+| Pricing guidelines | [src-tauri/src/pricing_guidelines.md](../src-tauri/src/pricing_guidelines.md) | Company rules: service components, net prices, closest match, where to look per service, seasonality, several options |
 
 ## One search, end to end
 
@@ -64,6 +65,7 @@ sequenceDiagram
 ```
 
 - **One chat = one Claude session.** Follow-up questions use `--resume <session_id>`. Sessions are stored by the CLI, scoped to the app's fixed working directory (`workspace/`).
+- **Instructions** are passed with `--append-system-prompt`. Replacing the default prompt (`--system-prompt`) makes `ToolSearch` unusable, which hides the connectors.
 - **Isolation.** `--setting-sources ""` ignores the user's own Claude Code settings, CLAUDE.md files and hooks. Environment variables from a parent Claude Code session are removed before spawning, because they hide the claude.ai connectors from the child.
 - **No API key.** Each user's existing Claude login is used, so every staff member needs Claude Code installed and signed in.
 
@@ -76,6 +78,7 @@ sequenceDiagram
 | Drive | claude.ai connector `claude.ai Google Drive` | Same patterns (search, read, download; no create, copy or share) | Same |
 | WhatsApp | `.txt` chat exports picked in Settings, copied to `workspace/sources/whatsapp/` | Only `Read` / `Grep` / `Glob`, and only when a local source is ticked; no write or shell tools exist | Settings → Attach .txt export |
 | Saved answers | Supplier answers recorded in Pricy, `workspace/sources/answers/*.md` | Same as WhatsApp | Filled by *Record supplier answer…* |
+| Web | Public websites, for trains (booking links) and admission tickets (purchase links) | Only `WebSearch` / `WebFetch`, only when Web is ticked | Optional reference links in Settings |
 
 Per search, [sources.rs](../src-tauri/src/sources.rs) turns the ticked sources into:
 - `--allowedTools`: `ToolSearch`, read patterns for each ticked connector, and `Read`/`Grep`/`Glob` if WhatsApp is ticked;
@@ -85,7 +88,10 @@ Per search, [sources.rs](../src-tauri/src/sources.rs) turns the ticked sources i
 Design notes, verified with CLI 2.1.197:
 - claude.ai connectors load on demand through `ToolSearch` (deferred tools). Limiting built-in tools with `--tools` also hides them, so unwanted built-ins are blocked by name instead.
 - Wildcard allow rules work for MCP tool names: `mcp__claude_ai_Google_Drive__*search*` allowed `search_files`, and `create_file` was denied.
-- Connector status comes from `claude mcp list` (about 20–40 s, run in the background).
+- Connector status is read from the `init` event of a short headless session, which is stopped before any model call, so it uses no tokens. `claude mcp list` only checks that a server is reachable, and shows "Connected" for connectors Claude Code isn't signed in to.
+- A connector signed in on claude.ai can still be `needs-auth` in Claude Code. Fix: run `claude`, type `/mcp`, pick the connector and sign in.
+- `MCP_CONNECTION_NONBLOCKING=false` is set when the CLI starts, so connectors are connected (and their tools loaded) before Claude's first step.
+- Every turn removes the connectors it doesn't use (server-level deny, e.g. `mcp__claude_ai_Figma`) and the non-read tools of the ones it uses. Claude never sees write tools, and each turn's context stays small. The tool names come from the startup connector check; until that check finishes, only the allow rules apply.
 
 ## Local storage
 
@@ -104,7 +110,7 @@ Compared with [expected_workflow.png](expected_workflow.png). The state machines
 
 | Step | Owner | Status | How |
 |---|---|---|---|
-| 1. Sales request (booking no., date, pax, service type, itinerary / tour details, pick-up / drop-off, notes) | Sales | 🟡 Partial | Free text; Claude asks for missing details. No structured form yet. |
+| 1. Sales request (booking no., date, pax, service type, itinerary / tour details, pick-up / drop-off, notes) | Sales | 🟢 Done | Request form ([RequestForm.tsx](../src/RequestForm.tsx), from [sales_request_sample.html](../input_assets/sales_request_sample.html)) on every new search and via *Request form*. It builds the "Field: value" summary into the prompt; free text still works. |
 | 2. Claude checks the database | Claude | 🟢 Done | Searches the ticked sources (incl. **Saved answers**); a hidden marker sets *Price found* / *No price*. |
 | A3. Operations approves | Ops | 🟢 Done | *Send for approval…* emails the picked team members; *Approved* / *Not correct* are recorded in the request. |
 | A4. Claude sends the result to Sales | Claude | 🟢 Done | Claude writes the **Final answer** card; *Send to Sales…* emails it. |

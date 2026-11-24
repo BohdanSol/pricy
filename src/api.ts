@@ -8,6 +8,10 @@ export interface Chat {
   createdAt: number;
   updatedAt: number;
   status: ChatStatus;
+  /** Operations person who approved the price / forwarded the supplier's answer. */
+  approvedBy: string | null;
+  /** Operations' chosen option or note. */
+  approvalNote: string | null;
 }
 
 /** Workflow state of a request (see architecture/WORKFLOW.md). */
@@ -53,7 +57,7 @@ export interface Message {
   usage: Usage | null;
 }
 
-export type SourceId = "tint" | "slack" | "whatsapp" | "saved" | "drive";
+export type SourceId = "tint" | "slack" | "whatsapp" | "saved" | "web" | "drive";
 
 export interface SourceInfo {
   id: SourceId;
@@ -72,6 +76,7 @@ export interface Connector {
   name: string;
   status: string;
   connected: boolean;
+  tools: string[];
 }
 
 export interface SourceFile {
@@ -85,6 +90,10 @@ export interface Settings {
   model: string;
   /** One team member per line: "Name <email>" or "email". */
   team: string;
+  /** Used as "Price Requested By" in the Supplier Notes. */
+  userName: string;
+  /** Train / ticket websites and other references given to Claude with every search. */
+  referenceLinks: string;
 }
 
 export interface ClaudeStatus {
@@ -123,10 +132,26 @@ export const api = {
   listWhatsappFiles: () => invoke<SourceFile[]>("list_whatsapp_files"),
   addWhatsappFiles: (paths: string[]) => invoke<string[]>("add_whatsapp_files", { paths }),
   removeWhatsappFile: (name: string) => invoke<void>("remove_whatsapp_file", { name }),
-  workflowEvent: (chatId: string, event: WorkflowEvent, recipients: string[] = []) =>
-    invoke<Message[]>("workflow_event", { chatId, event, recipients }),
-  runStep: (chatId: string, step: WorkflowStep, supplierAnswer?: string) =>
-    invoke<Message[]>("run_step", { chatId, step, supplierAnswer: supplierAnswer ?? null }),
+  workflowEvent: (
+    chatId: string,
+    event: WorkflowEvent,
+    recipients: string[] = [],
+    approval?: { approver: string; note?: string },
+  ) =>
+    invoke<Message[]>("workflow_event", {
+      chatId,
+      event,
+      recipients,
+      approver: approval?.approver ?? null,
+      note: approval?.note ?? null,
+    }),
+  runStep: (chatId: string, step: WorkflowStep, supplierAnswer?: string, approver?: string) =>
+    invoke<Message[]>("run_step", {
+      chatId,
+      step,
+      supplierAnswer: supplierAnswer ?? null,
+      approver: approver ?? null,
+    }),
 };
 
 export const onStreamEvent = (cb: (e: StreamEvent) => void): Promise<UnlistenFn> =>

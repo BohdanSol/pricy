@@ -6,6 +6,7 @@
 //! - WhatsApp: chat export `.txt` files copied into `<workspace>/sources/whatsapp`,
 //!   searched with the CLI's built-in read-only Grep/Read/Glob tools.
 
+use crate::claude::Connector;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,12 @@ pub const SOURCES: &[SourceDef] = &[
         label: "Saved answers",
         default_connector: None,
         hint: "Supplier answers recorded in Pricy for earlier requests (Markdown files, one per request). Already confirmed by a supplier, so usually the most reliable recent price.",
+    },
+    SourceDef {
+        id: "web",
+        label: "Web",
+        default_connector: None,
+        hint: "Public websites, for train routes and booking links, admission ticket prices and purchase links. Prefer official sites and the reference links.",
     },
     SourceDef {
         id: "drive",
@@ -110,6 +117,7 @@ pub const BLOCKED_BUILTINS: &[&str] = &[
 ];
 
 const LOCAL_READ_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
+const WEB_TOOLS: &[&str] = &["WebSearch", "WebFetch"];
 
 /// "claude.ai Google Drive" → "mcp__claude_ai_Google_Drive"
 pub fn tool_prefix(connector: &str) -> String {
@@ -170,11 +178,57 @@ pub struct ToolPolicy {
     pub prompt: String,
 }
 
+/// Simple `*` wildcard match, as used by the read patterns.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut rest = text;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            match rest.strip_prefix(part) {
+                Some(r) => rest = r,
+                None => return false,
+            }
+        } else if let Some(pos) = rest.find(part) {
+            rest = &rest[pos + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    pattern.ends_with('*')
+        || parts
+            .last()
+            .is_none_or(|l| l.is_empty() || text.ends_with(l))
+}
+
+pub fn is_read_tool(tool: &str) -> bool {
+    let name = tool.rsplit("__").next().unwrap_or(tool);
+    READ_PATTERNS.iter().any(|p| glob_match(p, name))
+}
+
+/// Connectors that aren't used this turn are removed entirely (server-level deny), and
+/// a used connector's non-read tools are removed too: Claude never sees them, and every
+/// turn stays small (each connector adds its tool definitions to the context).
+fn deny_connectors(disallowed: &mut Vec<String>, connectors: &[Connector], used: &[String]) {
+    for c in connectors {
+        let prefix = tool_prefix(&c.name);
+        if used.contains(&prefix) {
+            disallowed.extend(c.tools.iter().filter(|t| !is_read_tool(t)).cloned());
+        } else {
+            disallowed.push(prefix);
+        }
+    }
+}
+
 /// For workflow steps (drafts, final answers): everything needed is already in the conversation.
-pub fn policy_no_tools() -> ToolPolicy {
+pub fn policy_no_tools(connectors: &[Connector]) -> ToolPolicy {
     let mut disallowed: Vec<String> = BLOCKED_BUILTINS.iter().map(|s| s.to_string()).collect();
     disallowed.extend(LOCAL_READ_TOOLS.iter().map(|s| s.to_string()));
+    disallowed.extend(WEB_TOOLS.iter().map(|s| s.to_string()));
     disallowed.push("ToolSearch".into());
+    deny_connectors(&mut disallowed, connectors, &[]);
     ToolPolicy {
         allowed: Vec::new(),
         disallowed,
@@ -183,7 +237,12 @@ pub fn policy_no_tools() -> ToolPolicy {
 }
 
 /// `local_files(id)` lists the files of a local source (WhatsApp, Saved answers).
-pub fn policy(selected: &[Selected], local_files: impl Fn(&str) -> Vec<String>) -> ToolPolicy {
+/// `connectors` is every connector the CLI knows (from the last status check); empty = unknown.
+pub fn policy(
+    selected: &[Selected],
+    connectors: &[Connector],
+    local_files: impl Fn(&str) -> Vec<String>,
+) -> ToolPolicy {
     let mut allowed: Vec<String> = vec!["ToolSearch".into()];
     let mut disallowed: Vec<String> = BLOCKED_BUILTINS.iter().map(|s| s.to_string()).collect();
     let mut prompt = String::from("## Sources enabled for this search\n\n");
@@ -202,9 +261,14 @@ pub fn policy(selected: &[Selected], local_files: impl Fn(&str) -> Vec<String>) 
                 let prefix = tool_prefix(conn);
                 allowed.extend(READ_PATTERNS.iter().map(|p| format!("{prefix}__{p}")));
                 prompt.push_str(&format!(
-                    "  Tools: `{prefix}__*` (load them with ToolSearch, e.g. query \"{}\"). Read-only: anything that writes or sends will be denied.\n",
+                    "  Tools: `{prefix}__*` (if they are not listed, load them with ToolSearch, e.g. query \"{}\"). Read-only: anything that writes or sends will be denied. If the connector needs sign-in, say so and that it is fixed in Claude Code with /mcp.\n",
                     s.def.label.to_lowercase()
                 ));
+            }
+            (None, "web") => {
+                allowed.extend(WEB_TOOLS.iter().map(|s| s.to_string()));
+                disallowed.retain(|d| !WEB_TOOLS.contains(&d.as_str()));
+                prompt.push_str("  Tools: WebSearch and WebFetch (read-only). Use them only for trains and admission tickets, and always give the booking / purchase link.\n");
             }
             (None, id) => {
                 uses_local = true;
@@ -226,6 +290,12 @@ pub fn policy(selected: &[Selected], local_files: impl Fn(&str) -> Vec<String>) 
             }
         }
     }
+
+    let used: Vec<String> = selected
+        .iter()
+        .filter_map(|s| s.connector.as_deref().map(tool_prefix))
+        .collect();
+    deny_connectors(&mut disallowed, connectors, &used);
 
     if uses_local {
         allowed.extend(LOCAL_READ_TOOLS.iter().map(|s| s.to_string()));
@@ -261,12 +331,89 @@ mod tests {
     }
 
     #[test]
+    fn unused_connectors_and_write_tools_are_removed() {
+        let conns = vec![
+            Connector {
+                name: "claude.ai Google Drive".into(),
+                status: "Connected".into(),
+                connected: true,
+                tools: vec![
+                    "mcp__claude_ai_Google_Drive__search_files".into(),
+                    "mcp__claude_ai_Google_Drive__create_file".into(),
+                ],
+            },
+            Connector {
+                name: "claude.ai Figma".into(),
+                status: "Connected".into(),
+                connected: true,
+                tools: vec![],
+            },
+        ];
+        let drive = Selected {
+            def: get("drive").unwrap(),
+            connector: Some("claude.ai Google Drive".into()),
+        };
+        let p = policy(&[drive], &conns, |_| Vec::new());
+        assert!(p.disallowed.iter().any(|d| d == "mcp__claude_ai_Figma"));
+        assert!(
+            p.disallowed
+                .iter()
+                .any(|d| d == "mcp__claude_ai_Google_Drive__create_file")
+        );
+        assert!(
+            !p.disallowed
+                .iter()
+                .any(|d| d == "mcp__claude_ai_Google_Drive__search_files")
+        );
+        assert!(
+            !p.disallowed
+                .iter()
+                .any(|d| d == "mcp__claude_ai_Google_Drive")
+        );
+
+        let p = policy_no_tools(&conns);
+        assert!(
+            p.disallowed
+                .iter()
+                .any(|d| d == "mcp__claude_ai_Google_Drive")
+        );
+    }
+
+    #[test]
+    fn read_patterns() {
+        assert!(is_read_tool("mcp__x__search_files"));
+        assert!(is_read_tool("mcp__x__get_file_metadata"));
+        assert!(is_read_tool("mcp__x__list_recent_files"));
+        assert!(!is_read_tool("mcp__x__create_file"));
+        assert!(!is_read_tool("mcp__x__send_message"));
+    }
+
+    #[test]
+    fn web_tools_only_when_web_selected() {
+        let web = Selected {
+            def: get("web").unwrap(),
+            connector: None,
+        };
+        let p = policy(&[web], &[], |_| Vec::new());
+        assert!(p.allowed.iter().any(|a| a == "WebSearch"));
+        assert!(!p.disallowed.iter().any(|d| d == "WebFetch"));
+        assert!(p.disallowed.iter().any(|d| d == "Read"));
+
+        let drive = Selected {
+            def: get("drive").unwrap(),
+            connector: Some("claude.ai Google Drive".into()),
+        };
+        let p = policy(&[drive], &[], |_| Vec::new());
+        assert!(p.disallowed.iter().any(|d| d == "WebSearch"));
+    }
+
+    #[test]
     fn local_tools_only_when_whatsapp_selected() {
         let drive = Selected {
             def: get("drive").unwrap(),
             connector: Some("claude.ai Google Drive".into()),
         };
-        let p = policy(&[drive], |_| Vec::new());
+        let p = policy(&[drive], &[], |_| Vec::new());
         assert!(
             p.allowed
                 .iter()
@@ -278,7 +425,7 @@ mod tests {
             def: get("whatsapp").unwrap(),
             connector: None,
         };
-        let p = policy(&[wa], |_| vec!["chat.txt".into()]);
+        let p = policy(&[wa], &[], |_| vec!["chat.txt".into()]);
         assert!(p.allowed.iter().any(|a| a == "Grep"));
         assert!(!p.disallowed.iter().any(|d| d == "Grep"));
         assert!(p.prompt.contains("sources/whatsapp/"));

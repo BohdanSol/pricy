@@ -942,3 +942,133 @@ kbd {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
+
+/* ---------- request form ---------- */
+
+.empty-form {
+  margin-top: 24px;
+  text-align: left;
+}
+.request-form fieldset {
+  border: 0;
+  margin: 0 0 18px;
+  padding: 0;
+}
+.request-form legend {
+  padding: 0;
+  margin-bottom: 10px;
+  font-weight: 650;
+  font-size: 15px;
+}
+.rf-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+.rf-full {
+  grid-column: 1 / -1;
+}
+.request-form label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 13px;
+  font-weight: 550;
+}
+.request-form input,
+.request-form select,
+.request-form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  font-size: 14px;
+}
+.request-form textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+.request-form input:focus,
+.request-form select:focus,
+.request-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.request-form .invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+.rf-req {
+  margin-left: 2px;
+  color: var(--danger);
+}
+.rf-error {
+  margin: 0 0 10px;
+  color: var(--danger);
+  font-size: 13px;
+}
+.rf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.rf-preview {
+  margin-top: 14px;
+  font-size: 13px;
+}
+.rf-preview summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.rf-preview pre {
+  margin: 8px 0 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-side);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+}
+.request-form.compact .rf-grid {
+  gap: 10px 12px;
+}
+.dialog .request-form label {
+  margin: 0 0 5px;
+  display: block;
+}
+
+.composer-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.composer-top .mini-btn {
+  flex: none;
+  margin-top: 2px;
+}
+
+@media (max-width: 760px) {
+  .rf-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Same height and look for every dropdown (macOS draws native ones smaller). */
+.request-form select,
+.dialog select {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 38px;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23999' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  cursor: pointer;
+}
+.request-form input {
+  height: 38px;
+}

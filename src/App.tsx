@@ -13,7 +13,10 @@ import {
   type WorkflowStep,
 } from "./api";
 import { SettingsDialog } from "./SettingsDialog";
+import { RequestForm } from "./RequestForm";
 import {
+  ApproveDialog,
+  lastRecipients,
   parseTeam,
   SendDialog,
   StatusPill,
@@ -33,11 +36,6 @@ interface Streaming {
   tools: string[];
 }
 
-const EXAMPLES = [
-  "2 pax, Matera to Rome, 18 May 2027 — private transfer. What's the price and travel time?",
-  "Private walking tour of the Vatican Museums for 6 pax in June — what did we quote last time?",
-  "Latest supplier price for an Amalfi Coast boat tour, 4 pax",
-];
 
 const isMac = navigator.userAgent.includes("Mac");
 const MOD = isMac ? "⌘" : "Ctrl+";
@@ -56,6 +54,8 @@ export default function App() {
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [sendKind, setSendKind] = useState<SendKind | null>(null);
   const [recordingAnswer, setRecordingAnswer] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [showForm, setShowForm] = useState(false);
 
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
@@ -178,11 +178,11 @@ export default function App() {
   }
 
   /** A step Claude performs (supplier draft, final answer). */
-  async function runStep(step: WorkflowStep, supplierAnswer?: string) {
+  async function runStep(step: WorkflowStep, supplierAnswer?: string, approver?: string) {
     if (!activeId) return;
     const chatId = activeId;
     try {
-      const added = await api.runStep(chatId, step, supplierAnswer);
+      const added = await api.runStep(chatId, step, supplierAnswer, approver);
       appendIfActive(chatId, added);
       markRunning(chatId);
     } catch (e) {
@@ -194,16 +194,28 @@ export default function App() {
   }
 
   /** A step done by a person (sent an email, approved…), optionally followed by a Claude step. */
-  async function workflowEvent(event: WorkflowEvent, recipients: string[] = [], then?: WorkflowStep) {
+  async function workflowEvent(
+    event: WorkflowEvent,
+    recipients: string[] = [],
+    then?: WorkflowStep,
+    approval?: { approver: string; note?: string },
+  ) {
     if (!activeId) return;
     const chatId = activeId;
     try {
-      appendIfActive(chatId, await api.workflowEvent(chatId, event, recipients));
+      appendIfActive(chatId, await api.workflowEvent(chatId, event, recipients, approval));
       await refreshChats();
       if (then) await runStep(then);
     } catch (e) {
       showError(e);
     }
+  }
+
+  /** Puts the request form's summary into the message box. */
+  function applyRequest(summary: string) {
+    setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${summary}` : summary));
+    setShowForm(false);
+    requestAnimationFrame(() => inputRef.current?.focus());
   }
 
   function newChat() {
@@ -327,17 +339,13 @@ export default function App() {
           {messages.length === 0 && !live ? (
             <div className="empty">
               <div className="empty-dot" />
-              <h1>Find a price for a transfer or tour</h1>
+              <h1>New transfer or tour request</h1>
               <p className="muted">
-                Describe the service (transfer or tour, date, pax, places, service type). Pricy looks for an existing price in the
+                Fill in the request (or describe it freely in the box below). Pricy looks for an existing price in the
                 shared data.
               </p>
-              <div className="examples">
-                {EXAMPLES.map((ex) => (
-                  <button key={ex} onClick={() => send(ex)} disabled={!!claudeMissing}>
-                    {ex}
-                  </button>
-                ))}
+              <div className="empty-form">
+                <RequestForm onUse={applyRequest} />
               </div>
             </div>
           ) : (
@@ -381,6 +389,7 @@ export default function App() {
             onEvent={(e, then) => workflowEvent(e, [], then)}
             onStep={runStep}
             onRecordAnswer={() => setRecordingAnswer(true)}
+            onApprove={() => setApproving(true)}
           />
         )}
 
@@ -391,12 +400,19 @@ export default function App() {
             if (!isRunning) send(input);
           }}
         >
-          <SourceBar
-            sources={src.sources}
-            active={src.active}
-            onToggle={src.toggle}
-            onOpenSettings={() => setShowSettings(true)}
-          />
+          <div className="composer-top">
+            <SourceBar
+              sources={src.sources}
+              active={src.active}
+              onToggle={src.toggle}
+              onOpenSettings={() => setShowSettings(true)}
+            />
+            {(messages.length > 0 || live) && (
+              <button type="button" className="mini-btn" onClick={() => setShowForm(true)}>
+                Request form
+              </button>
+            )}
+          </div>
           <div className="composer-box">
             <textarea
               ref={inputRef}
@@ -461,10 +477,31 @@ export default function App() {
       )}
       {recordingAnswer && (
         <SupplierAnswerDialog
+          team={team}
+          suggested={lastRecipients(messages, "sent_to_ops")}
           onClose={() => setRecordingAnswer(false)}
-          onSave={(text) => {
+          onSave={(text, approver) => {
             setRecordingAnswer(false);
-            runStep("final_from_supplier", text);
+            runStep("final_from_supplier", text, approver);
+          }}
+        />
+      )}
+      {showForm && (
+        <div className="overlay" onMouseDown={() => setShowForm(false)}>
+          <div className="dialog wide" onMouseDown={(e) => e.stopPropagation()}>
+            <h2>Request form</h2>
+            <RequestForm onUse={applyRequest} submitLabel="Add to message" compact />
+          </div>
+        </div>
+      )}
+      {approving && (
+        <ApproveDialog
+          team={team}
+          suggested={lastRecipients(messages, "sent_for_approval")}
+          onClose={() => setApproving(false)}
+          onApprove={(approver, note) => {
+            setApproving(false);
+            workflowEvent("approved", [], "final_from_approval", { approver, note });
           }}
         />
       )}
@@ -489,7 +526,7 @@ function SourceBar({
       <span className="source-bar-label muted">Search in</span>
       {sources.map((s) => {
         const checked = active.has(s.id);
-        const unavailable = s.files !== null && (s.health === "missing" || s.health === "empty");
+        const unavailable = s.files !== null && (s.health === "missing" || s.health === "idle");
         return (
           <label
             key={s.id}
@@ -515,7 +552,7 @@ function SourceBar({
 
 const KIND_TITLE: Record<string, string> = {
   supplier_draft: "Message to the supplier",
-  final: "Final answer for Sales",
+  final: "Supplier Notes for Sales · copy to TINT",
 };
 
 function MessageView({ message, sources }: { message: Message; sources: SourceState[] }) {

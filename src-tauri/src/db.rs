@@ -25,6 +25,10 @@ pub struct Chat {
     pub updated_at: i64,
     /// Workflow state, see `workflow::Status` and architecture/WORKFLOW.md.
     pub status: String,
+    /// Operations person who approved the price (or forwarded the supplier's answer).
+    pub approved_by: Option<String>,
+    /// Which option Operations chose / their note, when approving.
+    pub approval_note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -115,7 +119,7 @@ impl Db {
 
     pub fn list_chats(&self) -> Result<Vec<Chat>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, claude_session_id, created_at, updated_at, status
+            "SELECT id, title, claude_session_id, created_at, updated_at, status, approved_by, approval_note
              FROM chats ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], row_to_chat)?;
@@ -126,7 +130,7 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, title, claude_session_id, created_at, updated_at, status
+                "SELECT id, title, claude_session_id, created_at, updated_at, status, approved_by, approval_note
                  FROM chats WHERE id = ?1",
                 params![id],
                 row_to_chat,
@@ -143,6 +147,8 @@ impl Db {
             created_at: ts,
             updated_at: ts,
             status: "new".into(),
+            approved_by: None,
+            approval_note: None,
         };
         self.conn.execute(
             "INSERT INTO chats (id, title, claude_session_id, created_at, updated_at)
@@ -170,6 +176,14 @@ impl Db {
         self.conn.execute(
             "UPDATE chats SET status = ?2, updated_at = ?3 WHERE id = ?1",
             params![chat_id, status, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_approval(&self, chat_id: &str, by: &str, note: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chats SET approved_by = ?2, approval_note = ?3 WHERE id = ?1",
+            params![chat_id, by, note],
         )?;
         Ok(())
     }
@@ -275,6 +289,8 @@ fn row_to_chat(r: &rusqlite::Row) -> rusqlite::Result<Chat> {
         created_at: r.get(3)?,
         updated_at: r.get(4)?,
         status: r.get(5)?,
+        approved_by: r.get(6)?,
+        approval_note: r.get(7)?,
     })
 }
 
@@ -300,6 +316,13 @@ fn migrate(conn: &Connection) -> Result<()> {
              ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
              ALTER TABLE messages ADD COLUMN usage TEXT;
              PRAGMA user_version = 2;",
+        )?;
+    }
+    if version < 3 {
+        conn.execute_batch(
+            "ALTER TABLE chats ADD COLUMN approved_by TEXT;
+             ALTER TABLE chats ADD COLUMN approval_note TEXT;
+             PRAGMA user_version = 3;",
         )?;
     }
     Ok(())

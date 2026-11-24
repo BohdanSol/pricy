@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Custom Day Tour &amp; Transportation Request</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#EEF1F5; --surface:#FFFFFF; --ink:#1B2533; --muted:#5B6676;
+  --line:#D3D9E2; --accent:#1F5FBF; --accent-ink:#FFFFFF; --ok:#1E7A4F;
+  color-scheme: light;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#121821; --surface:#1A2230; --ink:#E7ECF3; --muted:#9AA6B6;
+    --line:#2C3748; --accent:#6EA0F0; --accent-ink:#0E1520; --ok:#5CC796;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#121821; --surface:#1A2230; --ink:#E7ECF3; --muted:#9AA6B6;
+  --line:#2C3748; --accent:#6EA0F0; --accent-ink:#0E1520; --ok:#5CC796;
+  color-scheme: dark;
+}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Figtree",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  font-size:16px;line-height:1.5}
+main{max-width:760px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:1.75rem;font-weight:700;margin:0 0 4px;letter-spacing:-0.01em}
+.intro{color:var(--muted);margin:0 0 28px}
+form{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px}
+fieldset{border:0;margin:0 0 22px;padding:0}
+legend{font-weight:600;font-size:1.05rem;margin-bottom:12px;padding:0}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.full{grid-column:1/-1}
+label{display:block;font-weight:500;font-size:.92rem;margin-bottom:6px}
+input,select,textarea{width:100%;font:inherit;color:var(--ink);background:var(--bg);
+  border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+textarea{min-height:110px;resize:vertical}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px}
+button{font:inherit;font-weight:600;border-radius:8px;padding:10px 16px;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.status{color:var(--ok);font-weight:600;min-height:1.5em;margin:10px 0 0}
+.preview{margin-top:28px}
+.preview h2{font-size:1.05rem;margin:0 0 8px}
+pre{white-space:pre-wrap;word-break:break-word;background:var(--surface);border:1px solid var(--line);
+  border-radius:12px;padding:16px;margin:0;font-family:inherit;font-size:.95rem}
+[hidden]{display:none !important}
+.req{color:#C0392B;margin-left:2px}
+.invalid{border-color:#C0392B !important;box-shadow:0 0 0 1px #C0392B}
+.status.error{color:#C0392B}
+@media (max-width:600px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Custom Day Tour and Transfer Request</h1>
+  <p class="intro">Fill in the request details, then copy the summary to send to Operations for pricing and availability.</p>
+
+  <form id="f" autocomplete="off">
+    <fieldset>
+      <legend>Request</legend>
+      <div class="grid">
+        <div>
+          <label for="brand">Brand</label>
+          <select id="brand" name="Brand">
+            <option value="">Select a brand</option>
+            <option>Tourist Japan</option>
+            <option>Tourist Korea</option>
+            <option>Tourist Israel</option>
+            <option>Tourist Italy</option>
+            <option>Tourist Jordan</option>
+            <option>Tourist Egypt</option>
+            <option>Tourist Saudi Arabia</option>
+            <option>Tourist Journey</option>
+          </select>
+        </div>
+        <div>
+          <label for="booking">Booking number or Freshdesk ticket</label>
+          <input id="booking" name="Booking number or Freshdesk ticket" placeholder="e.g. JP85534867 or ticket number">
+        </div>
+        <div>
+          <label for="date">Date</label>
+          <input id="date" name="Date" type="date">
+        </div>
+        <div class="cond" id="wrap-month">
+          <label for="month">Approximate month (if no date)</label>
+          <select id="month" name="Approximate month"><option value="">Select a month</option></select>
+        </div>
+        <div>
+          <label for="adults">Adults</label>
+          <select id="adults" name="Adults" data-min="1"><option value="">Select number of adults</option></select>
+        </div>
+        <div>
+          <label for="kids">Children</label>
+          <select id="kids" name="Children" data-min="0"><option value="">Select number of children</option></select>
+        </div>
+        <div class="full cond" id="wrap-seat" hidden>
+          <label for="seat">Child seat or booster seat</label>
+          <select id="seat" name="Child seat or booster seat">
+            <option value="">Select an option</option>
+            <option>Not required</option>
+            <option>Child seat required</option>
+            <option>Booster seat required</option>
+            <option>Child seat and booster seat required</option>
+          </select>
+        </div>
+        <div class="full">
+          <label for="service">Service type</label>
+          <select id="service" name="Service type">
+            <option value="">Select a service type</option>
+            <option>Transfer only</option>
+            <option>Vehicle and guide</option>
+            <option>Guide only</option>
+            <option>Vehicle only</option>
+          </select>
+        </div>
+        <div class="full cond" id="wrap-transfer" hidden>
+          <label for="transfer">Transfer type</label>
+          <select id="transfer" name="Transfer type">
+            <option value="">Select a transfer type</option>
+            <option>One way</option>
+            <option>Return</option>
+          </select>
+        </div>
+        <div class="full cond" id="wrap-duration" hidden>
+          <label for="duration">Duration</label>
+          <select id="duration" name="Duration">
+            <option value="">Select a duration</option>
+            <option>Half day (max 4.5 hours)</option>
+            <option>Full day (max 10 hours)</option>
+          </select>
+        </div>
+        <div class="full cond" id="wrap-tickets" hidden>
+          <label for="tickets">Entrance tickets</label>
+          <select id="tickets" name="Entrance tickets">
+            <option value="">Select an option</option>
+            <option>With entrance tickets</option>
+            <option>Without entrance tickets</option>
+          </select>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Itinerary</legend>
+      <div class="grid">
+        <div class="full">
+          <label for="itinerary">Itinerary</label>
+          <textarea id="itinerary" name="Itinerary" placeholder="Day by day overview, tours and timings"></textarea>
+        </div>
+        <div>
+          <label for="pickup">Pick up location</label>
+          <input id="pickup" name="Pick up location" placeholder="e.g. hotel name or address">
+        </div>
+        <div>
+          <label for="dropoff">Drop off location</label>
+          <input id="dropoff" name="Drop off location" placeholder="e.g. hotel name or address">
+        </div>
+        <div>
+          <label for="start">Start time</label>
+          <select id="start" name="Start time" class="time"><option value="">Select a start time</option></select>
+        </div>
+        <div>
+          <label for="end">End time</label>
+          <select id="end" name="End time" class="time"><option value="">Select an end time</option></select>
+        </div>
+        <div class="full">
+          <label for="luggage">Luggage</label>
+          <select id="luggage" name="Luggage">
+            <option value="">Select yes or no</option>
+            <option>Yes</option>
+            <option>No</option>
+          </select>
+        </div>
+        <div class="cond luggage-detail" hidden>
+          <label for="suitcases">Full size suitcases</label>
+          <select id="suitcases" name="Full size suitcases" data-min="0"><option value="">Select number of suitcases</option></select>
+        </div>
+        <div class="cond luggage-detail" hidden>
+          <label for="hand">Hand luggage</label>
+          <select id="hand" name="Hand luggage" data-min="0"><option value="">Select number of hand luggage</option></select>
+        </div>
+        <div>
+          <label for="mobility">Mobility level</label>
+          <select id="mobility" name="Mobility level">
+            <option value="">Select mobility level</option>
+            <option>No mobility issues</option>
+            <option>Limited mobility</option>
+            <option>Wheelchair access required</option>
+          </select>
+        </div>
+        <div class="full">
+          <label for="notes">Specific notes</label>
+          <textarea id="notes" name="Specific notes" placeholder="Special requests, dietary needs, timings, etc."></textarea>
+        </div>
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button type="button" class="primary" id="copy">Copy summary</button>
+      <button type="button" id="clear">Clear form</button>
+    </div>
+    <p class="status" id="status" aria-live="polite"></p>
+  </form>
+
+  <section class="preview" aria-label="Summary preview">
+    <h2>Summary preview</h2>
+    <pre id="out">Start filling in the form to see your summary here.</pre>
+  </section>
+</main>
+
+<script>
+(function(){
+  ['adults','kids','suitcases','hand'].forEach(function(id){
+    var sel=document.getElementById(id);
+    var min=parseInt(sel.getAttribute('data-min'),10);
+    for(var i=min;i<=50;i++){var o=document.createElement('option');o.value=String(i);o.textContent=String(i);sel.appendChild(o);}
+  });
+  (function(){
+    var names=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    var sel=document.getElementById('month');
+    var d=new Date(); var y=d.getFullYear(); var m=d.getMonth();
+    for(var k=0;k<24;k++){
+      var mm=(m+k)%12; var yy=y+Math.floor((m+k)/12);
+      var o=document.createElement('option'); o.textContent=names[mm]+' '+yy; o.value=o.textContent; sel.appendChild(o);
+    }
+  })();
+  [].forEach.call(document.querySelectorAll('select.time'),function(sel){
+    for(var h=0;h<24;h++){for(var q=0;q<60;q+=60){
+      var hh=(h<10?'0':'')+h, mm=(q<10?'0':'')+q;
+      var o=document.createElement('option'); o.value=hh+':'+mm; o.textContent=hh+':'+mm; sel.appendChild(o);
+    }}
+  });
+  var REQUIRED=['brand','month','booking','adults','kids','service','transfer','itinerary','pickup','dropoff','luggage','mobility'];
+  REQUIRED.forEach(function(id){
+    var el=document.getElementById(id); if(!el) return;
+    el.setAttribute('aria-required','true');
+    var lab=document.querySelector('label[for="'+id+'"]');
+    if(lab){var s=document.createElement('span');s.className='req';s.textContent='*';s.setAttribute('aria-hidden','true');lab.appendChild(s);}
+  });
+  function mobilityRequired(){
+    var svc=document.getElementById('service').value;
+    return svc==='Vehicle and guide'||svc==='Vehicle only';
+  }
+  function validate(){
+    var missing=[];
+    REQUIRED.forEach(function(id){
+      var el=document.getElementById(id); if(!el) return;
+      if(id==='mobility'&&!mobilityRequired()){el.classList.remove('invalid');return;}
+      var wrap=el.closest('.cond');
+      if(wrap&&wrap.hidden){el.classList.remove('invalid');return;}
+      if(!el.value.trim()){el.classList.add('invalid');missing.push(el.name);}
+      else el.classList.remove('invalid');
+    });
+    return missing;
+  }
+  var form=document.getElementById('f');
+  var out=document.getElementById('out');
+  var status=document.getElementById('status');
+  var KEY='booking-handoff-draft';
+  var fields=[].slice.call(form.querySelectorAll('input,select,textarea'));
+
+  function fmtDate(v){
+    if(!v) return '';
+    var p=v.split('-'); if(p.length!==3) return v;
+    var m=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    return parseInt(p[2],10)+' '+m[parseInt(p[1],10)-1]+' '+p[0];
+  }
+  function build(){
+    var lines=[];
+    fields.forEach(function(el){
+      var wrap=el.closest('.cond'); if(wrap&&wrap.hidden) return;
+      var v=el.value.trim();
+      if(el.type==='date') v=fmtDate(v);
+      if(!v) return;
+      if(el.tagName==='TEXTAREA') lines.push(el.name+':\n'+v);
+      else lines.push(el.name+': '+v);
+    });
+    return lines.length?lines.join('\n\n'):'';
+  }
+  function sync(){
+    var svc=document.getElementById('service').value;
+    var tk=document.getElementById('tickets').value;
+    document.getElementById('wrap-transfer').hidden=(svc!=='Transfer only');
+    var needsTickets=(svc==='Vehicle and guide'||svc==='Guide only');
+    document.getElementById('wrap-tickets').hidden=!needsTickets;
+    document.getElementById('wrap-duration').hidden=!(needsTickets||svc==='Vehicle only');
+    document.getElementById('wrap-month').hidden=!!document.getElementById('date').value;
+    document.getElementById('wrap-seat').hidden=!(parseInt(document.getElementById('kids').value,10)>0);
+    var lug=document.getElementById('luggage').value==='Yes';
+    [].forEach.call(document.querySelectorAll('.luggage-detail'),function(w){w.hidden=!lug;});
+    var mreq=document.querySelector('label[for="mobility"] .req');
+    if(mreq) mreq.hidden=!mobilityRequired();
+  }
+  function render(){
+    sync();
+    var t=build();
+    out.textContent=t||'Start filling in the form to see your summary here.';
+    try{
+      var d={}; fields.forEach(function(el){d[el.id]=el.value;});
+      localStorage.setItem(KEY,JSON.stringify(d));
+    }catch(e){}
+  }
+  try{
+    var saved=JSON.parse(localStorage.getItem(KEY)||'null');
+    if(saved) fields.forEach(function(el){ if(saved[el.id]!=null) el.value=saved[el.id]; });
+  }catch(e){}
+  form.addEventListener('input',function(e){status.textContent='';status.classList.remove('error');if(e.target&&e.target.classList)e.target.classList.remove('invalid');render();});
+  form.addEventListener('change',render);
+  document.getElementById('copy').addEventListener('click',function(){
+    var missing=validate();
+    if(missing.length){
+      status.classList.add('error');
+      status.textContent='Please complete the required fields: '+missing.join(', ')+'.';
+      var first=form.querySelector('.invalid'); if(first) first.focus();
+      return;
+    }
+    status.classList.remove('error');
+    var t=build();
+    if(!t){status.textContent='Please fill in at least one field first.';return;}
+    function done(){status.textContent='Summary copied.';}
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(t).then(done,function(){fallback(t);});
+    } else fallback(t);
+    function fallback(txt){
+      var ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta);
+      ta.select(); try{document.execCommand('copy');done();}catch(e){status.textContent='Please copy the summary below manually.';}
+      document.body.removeChild(ta);
+    }
+  });
+  document.getElementById('clear').addEventListener('click',function(){
+    form.reset(); try{localStorage.removeItem(KEY);}catch(e){}
+    [].forEach.call(form.querySelectorAll('.invalid'),function(el){el.classList.remove('invalid');}); status.classList.remove('error');
+    status.textContent='Form cleared.'; render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>

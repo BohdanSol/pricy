@@ -3,7 +3,7 @@
 Internal desktop tool for Sales / OPS to find quote prices quickly, using the company's shared data.
 
 **Data sources:** TINT, Slack and Google Drive through the user's own claude.ai connectors (read-only), plus WhatsApp chat exports (`.txt`) attached in Settings. Sales ticks which sources to search under the message box.
-**Covers:** transfers and tours.
+**Covers:** transfers and tours (guides, admission tickets, trains, food tastings), following the company pricing guidelines in [pricing_guidelines.md](src-tauri/src/pricing_guidelines.md): Net Price, closest match, seasonality, several options for approval.
 **Output:** a short answer with the price, timing (travel time or tour duration), conditions and the source it came from.
 
 **Workflow:** price found → approval by Operations → final answer to Sales; or no price → supplier message via Operations → supplier answer saved → final answer to Sales. Team emails are set in Settings; messages open in the mail app.
@@ -48,6 +48,7 @@ If the app can't find `claude`, set the CLI path in **Settings**. The app checks
 | `src/App.tsx` | Chat UI: history sidebar, streaming replies, composer |
 | `src/SettingsDialog.tsx` | Data sources (connectors, WhatsApp files), Claude CLI path, model |
 | `src/useSources.ts` | Source list, ticked sources, connector status |
+| `src/RequestForm.tsx` | Sales request form (brand, booking / Freshdesk ticket, pax, service type, itinerary, luggage…), builds the prompt |
 | `src/Workflow.tsx` | Workflow bar, send dialog (team checkboxes → mail), supplier answer dialog, token usage |
 | `src/api.ts` | Typed wrappers for Tauri commands and events |
 | `src-tauri/src/lib.rs` | Tauri commands, app state |

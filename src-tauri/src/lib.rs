@@ -18,6 +18,10 @@ const SETTING_CLAUDE_PATH: &str = "claude_path";
 const SETTING_MODEL: &str = "model";
 /// Team members' emails, one per line ("Name <email>" or just the email).
 const SETTING_TEAM: &str = "team";
+/// The app user's name, used as "Price Requested By" in the Supplier Notes.
+const SETTING_USER_NAME: &str = "user_name";
+/// Reference websites (train booking sites, ticket sites…) given to Claude with every search.
+const SETTING_REFERENCE_LINKS: &str = "reference_links";
 /// Comma-separated source ids ticked under the message box (remembered between searches).
 const SETTING_ACTIVE_SOURCES: &str = "active_sources";
 /// Per-source claude.ai connector name override: `connector_<source id>`.
@@ -29,6 +33,8 @@ struct AppState {
     workspace: PathBuf,
     /// Running turns, keyed by chat id, so they can be stopped.
     running: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    /// Connectors from the last status check, used to keep unused ones out of each turn.
+    connectors: Mutex<Vec<claude::Connector>>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -257,7 +263,7 @@ fn apply_event(db: &Db, chat_id: &str, event: Event) -> CmdResult<Option<Status>
     }
 }
 
-fn source_policy(db: &Db, workspace: &std::path::Path, source_ids: &[String]) -> ToolPolicy {
+fn source_policy(state: &AppState, db: &Db, source_ids: &[String]) -> ToolPolicy {
     let selected: Vec<sources::Selected> = source_ids
         .iter()
         .filter_map(|id| sources::get(id))
@@ -266,7 +272,10 @@ fn source_policy(db: &Db, workspace: &std::path::Path, source_ids: &[String]) ->
             connector: def.default_connector.map(|_| connector_name(db, def)),
         })
         .collect();
-    sources::policy(&selected, |id| sources::local_files(workspace, id))
+    let connectors = state.connectors.lock().unwrap();
+    sources::policy(&selected, &connectors, |id| {
+        sources::local_files(&state.workspace, id)
+    })
 }
 
 // ---------- searching ----------
@@ -307,7 +316,18 @@ fn send_message(
         if is_first {
             db.rename_chat(&chat_id, &make_title(&text)).map_err(err)?;
         }
-        (msg, source_policy(&db, &state.workspace, &sources))
+        let mut policy = source_policy(&state, &db, &sources);
+        if let Some(links) = db
+            .get_setting(SETTING_REFERENCE_LINKS)
+            .map_err(err)?
+            .filter(|l| !l.trim().is_empty())
+        {
+            policy.prompt.push_str(&format!(
+                "\n## Reference links (train booking sites, ticket sites and other resources)\n\n{}\n",
+                links.trim()
+            ));
+        }
+        (msg, policy)
     };
 
     start_turn(app, &state, chat_id, text, policy, TurnKind::Search)?;
@@ -326,16 +346,51 @@ fn running_chats(state: State<AppState>) -> Vec<String> {
     state.running.lock().unwrap().keys().cloned().collect()
 }
 
+/// Chat title: for a request-form summary ("Service type: …", "Pick up location: …"),
+/// "Service · From → To · Date"; otherwise the first line of the message.
 fn make_title(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    let mut title: String = line.chars().take(60).collect();
-    if line.chars().count() > 60 {
-        title.push('…');
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(':').map(str::trim))
+            .filter(|v| !v.is_empty())
+    };
+    let title = if let Some(service) = field("Service type") {
+        let route = match (field("Pick up location"), field("Drop off location")) {
+            (Some(a), Some(b)) => Some(format!("{a} → {b}")),
+            (a, b) => a.or(b).map(str::to_string),
+        };
+        let when = field("Date").or_else(|| field("Approximate month"));
+        [Some(service.to_string()), route, when.map(str::to_string)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    } else {
+        text.lines().next().unwrap_or("").trim().to_string()
+    };
+    let mut short: String = title.chars().take(70).collect();
+    if title.chars().count() > 70 {
+        short.push('…');
     }
-    if title.is_empty() {
+    if short.is_empty() {
         "New chat".into()
     } else {
-        title
+        short
+    }
+}
+
+#[cfg(test)]
+mod title_tests {
+    #[test]
+    fn title_from_form_summary() {
+        let t = super::make_title(
+            "Brand: Tourist Italy\n\nDate: 18 May 2027\n\nService type: Transfer only\n\nPick up location: Matera\n\nDrop off location: Rome FCO",
+        );
+        assert_eq!(t, "Transfer only · Matera → Rome FCO · 18 May 2027");
+        assert_eq!(
+            super::make_title("2 pax Matera to Rome"),
+            "2 pax Matera to Rome"
+        );
     }
 }
 
@@ -349,8 +404,14 @@ fn workflow_event(
     chat_id: String,
     event: String,
     recipients: Vec<String>,
+    approver: Option<String>,
+    note: Option<String>,
 ) -> CmdResult<Vec<Message>> {
     let ev = Event::parse(&event).ok_or("Unknown workflow event")?;
+    let approver = approver
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty());
+    let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     let db = state.db.lock().unwrap();
     let chat = db
         .get_chat(&chat_id)
@@ -366,7 +427,13 @@ fn workflow_event(
     let to = recipients.join(", ");
     let text = match ev {
         Event::SentForApproval => format!("Sent for approval to {to}"),
-        Event::Approved => "Approved by Operations".into(),
+        Event::Approved => {
+            let by = approver.as_deref().unwrap_or("Operations");
+            match &note {
+                Some(n) => format!("Approved by {by}: {n}"),
+                None => format!("Approved by {by}"),
+            }
+        }
         Event::Rejected => "Answer marked as not correct: ask the supplier".into(),
         Event::SentToOps => format!("Supplier message sent to Operations: {to}"),
         Event::SentToSales => format!("Final answer sent to {to}"),
@@ -375,6 +442,10 @@ fn workflow_event(
     let msg = db
         .add_message(&chat_id, NewMessage::new("event", &text).kind(&event))
         .map_err(err)?;
+    if ev == Event::Approved {
+        db.set_approval(&chat_id, approver.as_deref().unwrap_or(""), note.as_deref())
+            .map_err(err)?;
+    }
     db.set_status(&chat_id, next.as_str()).map_err(err)?;
     Ok(vec![msg])
 }
@@ -388,6 +459,7 @@ fn run_step(
     chat_id: String,
     step: String,
     supplier_answer: Option<String>,
+    approver: Option<String>,
 ) -> CmdResult<Vec<Message>> {
     let action = match step.as_str() {
         "draft_supplier" => Action::DraftSupplier,
@@ -400,7 +472,7 @@ fn run_step(
     }
 
     let mut added = Vec::new();
-    {
+    let ctx = {
         let db = state.db.lock().unwrap();
         let chat = db
             .get_chat(&chat_id)
@@ -445,6 +517,10 @@ fn run_step(
                 db.set_status(&chat_id, next.as_str()).map_err(err)?;
                 status = next;
             }
+            // The Operations person who forwarded the answer is the one approving it.
+            if let Some(a) = approver.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+                db.set_approval(&chat_id, a, None).map_err(err)?;
+            }
         }
 
         if !action.allowed_from(status) {
@@ -460,15 +536,31 @@ fn run_step(
             )
             .map_err(err)?,
         );
-    }
+        let chat = db
+            .get_chat(&chat_id)
+            .map_err(err)?
+            .ok_or("Chat not found")?;
+        workflow::StepContext {
+            requester: db.get_setting(SETTING_USER_NAME).map_err(err)?,
+            approver: chat.approved_by.clone(),
+            note: chat.approval_note.clone(),
+            supplier_answer: supplier_answer.clone(),
+            request_ref: format!(
+                "Pricy request \"{}\" ({}, ID {})",
+                chat.title,
+                workflow::date_of(chat.created_at),
+                &chat.id[..8.min(chat.id.len())]
+            ),
+        }
+    };
 
-    let prompt = action.prompt(supplier_answer.as_deref());
+    let prompt = action.prompt(&ctx);
     start_turn(
         app,
         &state,
         chat_id,
         prompt,
-        sources::policy_no_tools(),
+        sources::policy_no_tools(&state.connectors.lock().unwrap()),
         TurnKind::Step(action),
     )?;
     Ok(added)
@@ -549,7 +641,9 @@ async fn list_connectors(state: State<'_, AppState>) -> CmdResult<Vec<claude::Co
         .get_setting(SETTING_CLAUDE_PATH)
         .map_err(err)?;
     let bin = claude::find_claude(override_path.as_deref()).ok_or("Claude Code CLI not found")?;
-    claude::list_connectors(&bin, &state.workspace).await
+    let list = claude::list_connectors(&bin, &state.workspace).await?;
+    *state.connectors.lock().unwrap() = list.clone();
+    Ok(list)
 }
 
 #[derive(Serialize)]
@@ -633,6 +727,8 @@ struct Settings {
     model: String,
     /// One team member per line: "Name <email>" or "email".
     team: String,
+    user_name: String,
+    reference_links: String,
 }
 
 #[derive(Serialize)]
@@ -659,6 +755,14 @@ fn get_settings(state: State<AppState>) -> CmdResult<Settings> {
             .get_setting(SETTING_TEAM)
             .map_err(err)?
             .unwrap_or_default(),
+        user_name: db
+            .get_setting(SETTING_USER_NAME)
+            .map_err(err)?
+            .unwrap_or_default(),
+        reference_links: db
+            .get_setting(SETTING_REFERENCE_LINKS)
+            .map_err(err)?
+            .unwrap_or_default(),
     })
 }
 
@@ -668,9 +772,15 @@ fn save_settings(
     claude_path: String,
     model: String,
     team: String,
+    user_name: String,
+    reference_links: String,
 ) -> CmdResult<()> {
     let db = state.db.lock().unwrap();
     db.set_setting(SETTING_TEAM, team.trim()).map_err(err)?;
+    db.set_setting(SETTING_USER_NAME, user_name.trim())
+        .map_err(err)?;
+    db.set_setting(SETTING_REFERENCE_LINKS, reference_links.trim())
+        .map_err(err)?;
     db.set_setting(SETTING_CLAUDE_PATH, claude_path.trim())
         .map_err(err)?;
     db.set_setting(SETTING_MODEL, model.trim()).map_err(err)?;
@@ -721,6 +831,7 @@ pub fn run() {
                 db: Mutex::new(db),
                 workspace,
                 running: Mutex::new(HashMap::new()),
+                connectors: Mutex::new(Vec::new()),
             });
             Ok(())
         })

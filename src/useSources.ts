@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Connector, type SourceFile, type SourceId, type SourceInfo } from "./api";
 
-export type SourceHealth = "ok" | "warn" | "missing" | "empty" | "checking";
+export type SourceHealth = "ok" | "warn" | "missing" | "idle" | "checking";
 
 export interface SourceState extends SourceInfo {
   health: SourceHealth;
@@ -65,14 +65,15 @@ export function useSources(onError: (e: unknown) => void) {
       const n = s.files ?? 0;
       return n
         ? { ...s, health: "ok", statusText: `${n} supplier answer${n > 1 ? "s" : ""} saved` }
-        : { ...s, health: "empty", statusText: "Empty: supplier answers you record are saved here" };
+        : { ...s, health: "idle", statusText: "Empty: supplier answers you record are saved here" };
     }
+    if (s.id === "web") return { ...s, health: "ok", statusText: "Public websites (trains, admission tickets)" };
     if (connectors === null) return { ...s, health: "checking", statusText: "Checking connection…" };
     const c = connectors.find((c) => c.name === s.connector);
     if (!c) return { ...s, health: "missing", statusText: `Connector "${s.connector}" not found in Claude` };
     return c.connected
       ? { ...s, health: "ok", statusText: `Connected via ${c.name}` }
-      : { ...s, health: "warn", statusText: `${c.status} — reconnect it in claude.ai connector settings` };
+      : { ...s, health: "warn", statusText: `${c.status}: in a terminal run "claude", type /mcp, pick "${c.name}" and sign in` };
   });
 
   return {

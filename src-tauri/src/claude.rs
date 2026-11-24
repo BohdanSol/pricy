@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use crate::sources::ToolPolicy;
 
 pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+pub const PRICING_GUIDELINES: &str = include_str!("pricing_guidelines.md");
 
 /// Env vars set by a parent Claude Code session (e.g. when the app is started
 /// from a Claude Code terminal). Inherited, they make the child CLI hide the
@@ -23,6 +24,7 @@ fn is_parent_session_var(key: &str) -> bool {
         || key == "CLAUDE_PID"
         || key == "CLAUDE_EFFORT"
         || key == "CLAUDE_AGENT_SDK_VERSION"
+        || key == "MCP_CONNECTION_NONBLOCKING"
         || key.starts_with("CLAUDE_CODE_")
 }
 
@@ -36,6 +38,9 @@ pub fn command(bin: &Path) -> Command {
             }
         }
     }
+    // Wait for the claude.ai connectors to connect before the first model call;
+    // otherwise their tools aren't available yet when Claude starts searching.
+    cmd.env("MCP_CONNECTION_NONBLOCKING", "false");
     cmd
 }
 
@@ -45,35 +50,95 @@ pub struct Connector {
     pub name: String,
     pub status: String,
     pub connected: bool,
+    /// Tool names this connector exposes (only known when connected).
+    pub tools: Vec<String>,
 }
 
-/// Connectors available to the CLI, from `claude mcp list`
-/// (lines like `claude.ai Slack: https://mcp.slack.com/mcp - ! Needs authentication`).
+/// Connectors as a real headless session sees them. `claude mcp list` only checks
+/// that a server is reachable (it shows "Connected" for connectors Claude Code
+/// isn't signed in to), so this starts a session, reads its `init` event (sent
+/// before any model call, so it costs no tokens) and stops it.
 pub async fn list_connectors(bin: &Path, cwd: &Path) -> Result<Vec<Connector>, String> {
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(90),
-        command(bin).current_dir(cwd).args(["mcp", "list"]).output(),
-    )
-    .await
-    .map_err(|_| "Timed out while checking connectors".to_string())?
-    .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(text
-        .lines()
-        .filter_map(|line| {
-            let (name, rest) = line.split_once(": ")?;
-            let (_, status) = rest.rsplit_once(" - ")?;
-            let status = status
-                .trim_start_matches(['✔', '✗', '!', ' '])
-                .trim()
-                .to_string();
-            Some(Connector {
-                name: name.trim().to_string(),
-                connected: status.eq_ignore_ascii_case("connected"),
-                status,
-            })
+    let mut child = command(bin)
+        .current_dir(cwd)
+        .args([
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--setting-sources",
+            "",
+            "--tools",
+            "",
+            "--no-session-persistence",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"ping").await;
+    }
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout piped")).lines();
+
+    let init = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v["type"] == "system" && v["subtype"] == "init" {
+                return Some(v);
+            }
+        }
+        None
+    })
+    .await;
+    let _ = child.kill().await;
+
+    let init = init
+        .map_err(|_| "Timed out while checking connectors".to_string())?
+        .ok_or("Claude exited before reporting its connectors")?;
+    let all_tools: Vec<String> = init["tools"]
+        .as_array()
+        .map(|t| {
+            t.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
         })
-        .collect())
+        .unwrap_or_default();
+    Ok(init["mcp_servers"]
+        .as_array()
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(|s| {
+                    let name = s["name"].as_str()?.to_string();
+                    let raw = s["status"].as_str().unwrap_or("unknown");
+                    let status = match raw {
+                        "connected" => "Connected".to_string(),
+                        "needs-auth" => "Needs sign-in in Claude Code".to_string(),
+                        "failed" => "Failed to connect".to_string(),
+                        "pending" => "Still connecting".to_string(),
+                        other => other.to_string(),
+                    };
+                    let prefix = format!("{}__", crate::sources::tool_prefix(&name));
+                    let tools = all_tools
+                        .iter()
+                        .filter(|t| t.starts_with(&prefix))
+                        .cloned()
+                        .collect();
+                    Some(Connector {
+                        name,
+                        connected: raw == "connected",
+                        status,
+                        tools,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Locate the `claude` binary. GUI apps on macOS don't inherit the shell PATH,
@@ -187,6 +252,12 @@ pub async fn run_turn(
     mut cancel: oneshot::Receiver<()>,
     on_event: impl Fn(StreamEvent),
 ) -> Result<TurnResult, String> {
+    // Pricy's instructions are appended, not used as a replacement: replacing Claude Code's
+    // default system prompt also drops what makes ToolSearch (and so the claude.ai connectors) usable.
+    let instructions = format!(
+        "{SYSTEM_PROMPT}\n\n{PRICING_GUIDELINES}\n\n{}",
+        req.policy.prompt
+    );
     let mut cmd = command(req.bin);
     cmd.current_dir(req.cwd)
         .args([
@@ -199,10 +270,8 @@ pub async fn run_turn(
             // claude.ai connectors still load; only the allowed read tools can be used.
             "--setting-sources",
             "",
-            "--system-prompt",
-            SYSTEM_PROMPT,
             "--append-system-prompt",
-            &req.policy.prompt,
+            &instructions,
         ])
         .arg("--allowedTools")
         .args(&req.policy.allowed)
